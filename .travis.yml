@@ -106,12 +106,13 @@ before_script:
       conda install swig; cd ../;
       git clone https://github.com/opesci/yask.git;
       cd yask; make compiler-api; pip install -e .; cd ../devito;
-    fi
-  - if [[ $DEVITO_BACKEND == 'ops']]; then
-      cd ../;
+    elif [[ $DEVITO_BACKEND == 'ops']]; then
+      cd $HOME;
       git clone https://github.com/opesci/OPS.git;
-      cd OPS/OPS/ops/c; NV_ARCH=kepler make;
-      cd ../devito;
+      cd /OPS/ops/c; 
+      NV_ARCH=kepler make OPS_INSTALL_PATH=$HOME/OPS/ops OPS_COMPILER=gnu MPI_INSTALL_PATH=`which mpicc | sed 's/\/bin\/mpicc//g'`
+      cd $HOME/devito;
+    fi
 
 script:
   - flake8 --builtins=ArgumentError .
