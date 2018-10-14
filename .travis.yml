@@ -15,7 +15,7 @@ matrix:
       addons:
         apt:
           sources:
-            - ubuntu-toolchain-r-test     # For gcc 4.9, 5 and 7
+            - ubuntu-toolchain-r-test # For gcc 4.9, 5 and 7
           packages:
             - gcc-4.9
             - g++-4.9
@@ -25,7 +25,7 @@ matrix:
       addons:
         apt:
           sources:
-            - ubuntu-toolchain-r-test     # For gcc 4.9, 5 and 7
+            - ubuntu-toolchain-r-test # For gcc 4.9, 5 and 7
           packages:
             - gcc-5
             - g++-5
@@ -35,7 +35,7 @@ matrix:
       addons:
         apt:
           sources:
-            - ubuntu-toolchain-r-test     # For gcc 4.9, 5 and 7
+            - ubuntu-toolchain-r-test # For gcc 4.9, 5 and 7
           packages:
             - gcc-4.9
             - g++-4.9
@@ -45,7 +45,7 @@ matrix:
       addons:
         apt:
           sources:
-            - ubuntu-toolchain-r-test     # For gcc 4.9, 5 and 7
+            - ubuntu-toolchain-r-test # For gcc 4.9, 5 and 7
           packages:
             - gcc-7
             - g++-7
@@ -55,7 +55,7 @@ matrix:
       addons:
         apt:
           sources:
-            - ubuntu-toolchain-r-test     # For gcc 4.9, 5 and 7
+            - ubuntu-toolchain-r-test # For gcc 4.9, 5 and 7
           packages:
             - gcc-7
             - g++-7
@@ -71,14 +71,14 @@ matrix:
 addons:
   apt:
     sources:
-      - ubuntu-toolchain-r-test     # For gcc 4.9, 5 and 7
+      - ubuntu-toolchain-r-test # For gcc 4.9, 5 and 7
 
 before_install:
   # Setup anaconda
   - if [[ "$TRAVIS_PYTHON_VERSION" == "2.7" ]]; then
-      wget https://repo.continuum.io/miniconda/Miniconda2-4.5.4-Linux-x86_64.sh -O miniconda.sh;
+    wget https://repo.continuum.io/miniconda/Miniconda2-4.5.4-Linux-x86_64.sh -O miniconda.sh;
     else
-      wget https://repo.continuum.io/miniconda/Miniconda3-4.5.4-Linux-x86_64.sh -O miniconda.sh;
+    wget https://repo.continuum.io/miniconda/Miniconda3-4.5.4-Linux-x86_64.sh -O miniconda.sh;
     fi
   - bash miniconda.sh -b -p $HOME/miniconda
   - export PATH="$HOME/miniconda/bin:$PATH"
@@ -92,10 +92,10 @@ before_install:
 install:
   # Install devito with conda
   - if [[ $INSTALL_TYPE == 'conda' ]]; then
-      conda env create -q -f environment.yml python=$TRAVIS_PYTHON_VERSION;
-      source activate devito;
-      pip install -e .;
-      conda list;
+    conda env create -q -f environment.yml python=$TRAVIS_PYTHON_VERSION;
+    source activate devito;
+    pip install -e .;
+    conda list;
     fi
   # Install devito with pip
   - if [[ $INSTALL_TYPE == 'pip_setup' ]]; then python setup.py install; fi
@@ -103,15 +103,17 @@ install:
 before_script:
   - echo -e "Host github.com\n\tStrictHostKeyChecking no\n" >> ~/.ssh/config
   - if [[ $DEVITO_BACKEND == 'yask' ]]; then
-      conda install swig; cd ../;
-      git clone https://github.com/opesci/yask.git;
-      cd yask; make compiler-api; pip install -e .; cd ../devito;
+    conda install swig; cd ../;
+    git clone https://github.com/opesci/yask.git;
+    cd yask; make compiler-api; pip install -e .; cd ../devito;
     elif [[ $DEVITO_BACKEND == 'ops']]; then
-      cd $HOME;
-      git clone https://github.com/opesci/OPS.git;
-      cd /OPS/ops/c; 
-      NV_ARCH=kepler make OPS_INSTALL_PATH=$HOME/OPS/ops OPS_COMPILER=gnu MPI_INSTALL_PATH=`which mpicc | sed 's/\/bin\/mpicc//g'`
-      cd $HOME/devito;
+    cd $HOME;
+    git clone https://github.com/opesci/OPS.git;
+    cd OPS/OPS/ops/c;
+    NV_ARCH=kepler make OPS_INSTALL_PATH=$HOME/OPS/ops OPS_COMPILER=gnu MPI_INSTALL_PATH=`which mpicc | sed 's/\/bin\/mpicc//g'`
+    cd $HOME/OPS/scripts;
+    ./test_install.sh
+    cd $HOME/devito;
     fi
 
 script:
@@ -137,16 +139,16 @@ script:
   - if [[ $RUN_EXAMPLES == 'True' ]]; then py.test --nbval examples/seismic/tutorials/0[1-3]*; fi
   # Code coverage and documentation generation
   - if [[ $INSTALL_TYPE == 'conda' ]]; then
-      codecov;
-      sphinx-apidoc -f -o docs/ examples;
-      sphinx-apidoc -f -o docs/ devito devito/yask/*;
-      cd docs;
-      make html;
-      cd ..;
+    codecov;
+    sphinx-apidoc -f -o docs/ examples;
+    sphinx-apidoc -f -o docs/ devito devito/yask/*;
+    cd docs;
+    make html;
+    cd ..;
     fi
   # Docs deployment only once from a single build
   - if [[ $DEVITO_ARCH == 'gcc-5' ]]; then
-          set -e;
-          pip install doctr;
-          doctr deploy . --built-docs docs --key-path .deploy_key.enc;
+    set -e;
+    pip install doctr;
+    doctr deploy . --built-docs docs --key-path .deploy_key.enc;
     fi
