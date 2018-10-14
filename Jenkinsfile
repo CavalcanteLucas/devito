@@ -162,7 +162,7 @@ def installOPS() {
            '''
     }
     dir ("${WORKSPACE}/scratch/OPS/script") {
-        sh "./test_install"
+        sh "./test_install.sh"
     }
 }
 
