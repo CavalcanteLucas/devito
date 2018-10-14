@@ -158,9 +158,12 @@ def installOPS() {
     dir ("${WORKSPACE}/scratch") { sh 'git clone https://github.com/opesci/OPS.git' }
     dir ("${WORKSPACE}/scratch/OPS/ops/c") {
         sh '''source activate devito
-              NV_ARCH=Kepler make
+              NV_ARCH=Kepler make OPS_INSTALL_PATH=${WORKSPACE}/scratch/OPS/ops OPS_COMPILER=gnu MPI_INSTALL_PATH=`which mpicc | sed 's/\/bin\/mpicc//g'`
            '''
-    } 
+    }
+    dir ("${WORKSPACE}/scratch/OPS/script") {
+        sh "./test_install"
+    }
 }
 
 def runPipTests() {
