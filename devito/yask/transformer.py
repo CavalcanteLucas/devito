@@ -96,6 +96,9 @@ def yaskit(trees, yc_soln):
 
         # Build the YASK equations as well as all necessary grids
         for k, v in conditions:
+
+            from IPython import embed; embed()
+
             yask_expr = make_yask_ast(k, yc_soln, mapper)
 
             if yask_expr is not None:

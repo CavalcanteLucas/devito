@@ -9,6 +9,7 @@ from devito.symbolics.extended_sympy import ListInitializer
 from devito.ops.utils import namespace
 from devito.ops.types import OPSDeclObject
 
+from devito.ops.transformer import make_ops_ast
 
 __all__ = ['Operator']
 
@@ -35,13 +36,16 @@ class Operator(OperatorRunnable):
             node = tree[0].root
             expressions = [e for e in FindNodes(Expression).visit(node)]
             iterations = [i for i in FindNodes(Iteration).visit(node)]
+            expr = expressions[0].expr
+
+            make_ops_ast(expr)
 
             """
             We need to create an `OPS grid`. 
             For a (x,y) spatial domain, that'd be something like: 
             "ops_block grid = ops_decl_block(2, "grid");"
             """
-            dim = expressions[0].expr.grid.dim  # TO DO: generalize for more exps
+            dim = expr.grid.dim  # TO DO: generalize for more exps
             ops_grid_Object = OPSDeclObject(dtype = namespace['type-ops_grid'],
                                             name = namespace['name-ops_grid'], 
                                             value = Function(namespace['call-ops_grid'])
@@ -121,6 +125,6 @@ class Operator(OperatorRunnable):
         # for od in ops_data:
         #     print(od)
 
-        raise NotImplementedError
+        # raise NotImplementedError
 
 
