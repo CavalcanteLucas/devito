@@ -10,6 +10,7 @@ from devito.ops.utils import namespace
 from devito.ops.types import OPSDeclObject
 
 from devito.ops.transformer import make_ops_ast
+from devito.ops.node_factory import ops_node_factory
 
 __all__ = ['Operator']
 
@@ -26,19 +27,28 @@ class Operator(OperatorRunnable):
     def _specialize_iet(self, iet, **kwargs):
         ops_data = []
 
+
+        # Only one node factory for all expression so we can keep track 
+        # of all kernels generated.
+        nfops = ops_node_factory()    
+
         """
         First things first.
         """
         ops_init_Object = Call(name=namespace['call-ops_init'], 
                                 params=(0, 'NULL', 1))
 
+
         for (section, tree) in (find_offloadable_trees(iet).items()):
             node = tree[0].root
-            expressions = [e for e in FindNodes(Expression).visit(node)]
+            expressions = [e for e in FindNodes(Expression).visit(node)]           
             iterations = [i for i in FindNodes(Iteration).visit(node)]
-            expr = expressions[0].expr
+            expr = expressions[0].expr           
 
-            make_ops_ast(expr)
+            nfops.new_kernel_node(expr)
+            make_ops_ast(expr,nfops)
+            
+            nfops.print_kernel(expr)
 
             """
             We need to create an `OPS grid`. 

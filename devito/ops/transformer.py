@@ -1,15 +1,35 @@
+from sympy import Eq, symbols
 
 
-def make_ops_ast(expr):
-
-    # from IPython import embed; embed()  
-
-    if expr.is_Equality:
+def make_ops_ast(expr, nfops):
+    if expr.is_Integer:
+        return nfops.new_const_number_node(int(expr))
+    elif expr.is_Float:
+        return nfops.new_const_number_node(float(expr))
+    elif expr.is_Rational:
+        a, b = expr.as_numer_denom()
+        return nfops.new_const_number_node(float(a)/float(b))
+    elif expr.is_Mul:
         (lhs, rhs) = expr.args
-        print(lhs,end='\n > '); make_ops_ast(lhs)
-        print(rhs,end='\n > '); make_ops_ast(rhs)
+        make_ops_ast(lhs,nfops)
+        nfops.new_operation_node('*')
+        make_ops_ast(rhs,nfops)
+    elif expr.is_Add:
+        (lhs, rhs) = expr.args
+        make_ops_ast(lhs,nfops)
+        nfops.new_operation_node('+')
+        make_ops_ast(rhs,nfops)
+    elif expr.is_Equality:
+        (lhs, rhs) = expr.args           
+        make_ops_ast(lhs, nfops)     
+        nfops.new_operation_node('=')
+        make_ops_ast(rhs, nfops)     
     elif expr.is_Indexed:
-        # from IPython import embed; embed()  
-        print('helo darkness my old friend')
+        #function = expr.function
+        # print('function', function)
+        # print('function index', function.indices)      
+        nfops.new_dimension_symbol_node(expr)  
+        ##[make_ops_ast(i.root, nfops) for i in function.indices]
     else:
-        print('night fever')
+        print(expr)
+        raise NotImplementedError("Missing handler in Devito-OPS translation")
