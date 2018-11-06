@@ -4,13 +4,12 @@ from devito.operator import OperatorRunnable
 from devito.ir.iet.utils import find_offloadable_trees
 from devito.ir.iet.nodes import Expression, Iteration, Call
 from devito.ir.iet.visitors import FindNodes
-from devito.symbolics.extended_sympy import ListInitializer
 
+from devito.symbolics.extended_sympy import ListInitializer
 from devito.ops.utils import namespace
 from devito.ops.types import OPSDeclObject
+from devito.ops.transformer import opsit, make_ops_ast
 
-from devito.ops.transformer import make_ops_ast
-from devito.ops.node_factory import ops_node_factory
 
 __all__ = ['Operator']
 
@@ -27,11 +26,6 @@ class Operator(OperatorRunnable):
     def _specialize_iet(self, iet, **kwargs):
         ops_data = []
 
-
-        # Only one node factory for all expression so we can keep track 
-        # of all kernels generated.
-        nfops = ops_node_factory()    
-
         """
         First things first.
         """
@@ -39,23 +33,21 @@ class Operator(OperatorRunnable):
                                 params=(0, 'NULL', 1))
 
 
-        for (section, tree) in (find_offloadable_trees(iet).items()):
-            node = tree[0].root
+        for (section, trees) in (find_offloadable_trees(iet).items()):
+            node = trees[0].root
             expressions = [e for e in FindNodes(Expression).visit(node)]           
             iterations = [i for i in FindNodes(Iteration).visit(node)]
             expr = expressions[0].expr           
 
-            nfops.new_kernel_node(expr)
-            make_ops_ast(expr,nfops)
-            
-            nfops.print_kernel(expr)
+            # Generate OPS kernels
+            a = opsit(trees)
 
             """
             We need to create an `OPS grid`. 
             For a (x,y) spatial domain, that'd be something like: 
             "ops_block grid = ops_decl_block(2, "grid");"
             """
-            dim = expr.grid.dim  # TO DO: generalize for more exps
+            dim = 2 # Generalize 
             ops_grid_Object = OPSDeclObject(dtype = namespace['type-ops_grid'],
                                             name = namespace['name-ops_grid'], 
                                             value = Function(namespace['call-ops_grid'])

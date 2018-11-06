@@ -1,4 +1,5 @@
 from collections import OrderedDict
+from collections import OrderedDict
 
 
 # OPS Conventions
@@ -19,5 +20,8 @@ namespace['type-ops_stencil'] = 'ops_stencil'
 namespace['call-ops_stencil'] = 'ops_decl_stencil'
 
 namespace['call-ops_par_loop'] = 'ops_par_loop'
+namespace['ops-kernel'] = lambda i: 'ops_kernel_%s' % i
+
+namespace['ops_acc'] = 'OPS_ACC'
 
 namespace['call-ops_exit'] = 'ops_exit'
