@@ -1,6 +1,4 @@
-from sympy import Function, Symbol, Add, Mul, Integer, Float, Rational
-
-from numpy import dtype
+from sympy import Eq, Symbol, Add, Mul, Integer, Float, Rational
 
 from devito.ops.utils import namespace
 
@@ -12,31 +10,50 @@ class ops_node_factory():
     def __init__(self):
         self.grids = {}        
 
-    def new_const_number_node(self, number):
-        print('teste')
-
     def new_int_node(self, number):
+        '''
+            Creates a new sympy integer object.
+
+            :param number: integer number.
+        '''
         # Should I test for integer?
         return Integer(number)      
 
     def new_float_node(self, number):
+        '''
+            Creates a new sympy float object.
+
+            :param number: float number.
+        '''
         # Should I test for float?
         return Float(number)
 
     def new_rational_node(self, num, den):
+        '''
+            Creates a new sympy rational object.
+
+            :param num: Rational numerator.
+            :param den: Rational denominator. 
+        '''
         return Rational(num, den)
 
-    def new_operation_node(self, operation):
-        print('teste')
-
     def new_add_node(self, lhs, rhs):
+        '''
+            Creates a new sympy Add object.
+
+            :param lhs: Left hand side of the sum.
+            :param rhs: Right hand side of the sum.
+        '''
         return Add(lhs, rhs)
 
     def new_mul_node(self, lhs,rhs):
-        return Mul(lhs,rhs)
+        '''
+            Creates a new sympy Mul object.
 
-    def new_equation(self):
-        self.ops_equation = Function()
+            :param lhs: Left hand side of the multiplication.
+            :param rhs: Right hand side of the multiplication.
+        '''
+        return Mul(lhs,rhs)
 
     def new_grid(self, name, dimensions):       
         '''
@@ -57,25 +74,21 @@ class ops_node_factory():
             symbol = Symbol(str(name) + '[' + 
                      namespace['ops_acc'] + 
                       str(len(self.grids)) + '(' +
-                     '0,0' + ')]')  # Where can I get this info?
+                     '0,0' + ')]')  # TODO Where can I get this info?
                      
             self.grids[grid_id] = symbol            
 
         return symbol
 
-        # if expr not in self.all_symbols_mapper_per_kernel:
 
-        #     parameter = '{0}_{1}'.format(
-        #         expr.name,
-        #         self.acc_counter
-        #     )
-        
-        ## TODO: Get data type
-        ## TODO: Identify OPS_READ and OPS_WRITE. OPS_READ should have a 'const' modifier.
-        # param_type = 'double'
-        # self.kernel_parameters.append(Symbol(symbol))
-        # self.all_symbols_mapper_per_kernel[self.current_kernel].append(symbol)
-        # print(self.all_symbols_mapper_per_kernel)
+    def new_equation_node(self, *args):
+        '''
+            Creates a new sympy equation with the provided arguments.
+
+            :param *args: arguments to construct the new equation.
+        '''
+        return Eq(*args)
+
 
 
 

@@ -14,6 +14,7 @@ def opsit(trees):
                   Expressions are searched.                  
     """
     #Track all OPS kernels created
+    mapper = {}
     processed = []
     for tree in trees:
         # All expressions whithin `tree`
@@ -27,17 +28,18 @@ def opsit(trees):
         nfops = ops_node_factory()    
 
         for k, v in conditions:
-            ops_expr = make_ops_ast(k, nfops)
+            ops_expr = make_ops_ast(k, nfops, mapper)
             print(ops_expr)
 
             if ops_expr is not None:
                 processed.append(ops_expr)
 
+    return mapper
 
-def make_ops_ast(expr, nfops):
+def make_ops_ast(expr, nfops, mapper):
 
     def nary2binary(args, op):
-        r = make_ops_ast(args[0], nfops)
+        r = make_ops_ast(args[0], nfops, mapper)
         return r if len(args) == 1 else op(r, nary2binary(args[1:], op))
 
     if expr.is_Integer:
@@ -55,10 +57,16 @@ def make_ops_ast(expr, nfops):
     elif expr.is_Add:
         return nary2binary(expr.args, nfops.new_add_node)
     elif expr.is_Equality:
-        # This is the endpoint. What exactly should I return here?!?!
-        return (make_ops_ast(expr.lhs,nfops), make_ops_ast(expr.rhs,nfops))
+        # return (make_ops_ast(expr.lhs, nfops,mapper),make_ops_ast(expr.rhs, nfops,mapper))
+        if expr.lhs.is_Symbol:
+            function = expr.lhs.base.function
+            mapper[function] = make_ops_ast(expr.rhs,nfops, mapper)
+        else:
+            return nfops.new_equation_node(*[make_ops_ast(i, nfops, mapper)
+                                             for i in expr.args])
+            # TODO Case not found yet.
     elif expr.is_Indexed:
-        dimensions = [make_ops_ast(i, nfops) 
+        dimensions = [make_ops_ast(i, nfops, mapper) 
                       for i in expr.indices]     
         return nfops.new_grid(expr.name, dimensions)
     else:
