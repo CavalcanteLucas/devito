@@ -2,7 +2,7 @@ from sympy import Eq, Symbol, Add, Mul, Integer, Float, Rational
 
 from devito.ops.utils import namespace
 
-class ops_node_factory():
+class Ops_node_factory():
     '''
         Class responsible to generate ops expression for building the OPS ast.
     '''
