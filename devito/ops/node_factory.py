@@ -4,7 +4,7 @@ from devito.ops.utils import namespace
 
 class ops_node_factory():
     '''
-        Class responsible to generate ops nodes for building the OPS ast.
+        Class responsible to generate ops expression for building the OPS ast.
     '''
 
     def __init__(self):
@@ -66,15 +66,17 @@ class ops_node_factory():
                                the first parameter be the time dimension.
         ''' 
 
-        grid_id = name + dimensions[0]
+        # FIXME arrumar nome do grid
+
+        grid_id = '%s%s' % (name,dimensions[0])
 
         if grid_id in self.grids:
             symbol = self.grids[grid_id]
         else:            
-            symbol = Symbol(str(name) + '[' + 
-                     namespace['ops_acc'] + 
-                      str(len(self.grids)) + '(' +
-                     '0,0' + ')]')  # TODO Where can I get this info?
+            # FIXME Where can I get the 0,0 info?
+            symbol = Symbol('%s[%s%s(%s)]' % 
+                            (grid_id, namespace['ops_acc'], 
+                             str(len(self.grids)), '0,0')) 
                      
             self.grids[grid_id] = symbol            
 
