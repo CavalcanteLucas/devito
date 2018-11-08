@@ -4,12 +4,16 @@ from devito.operator import OperatorRunnable
 from devito.ir.iet.utils import find_offloadable_trees
 from devito.ir.iet.nodes import Expression, Iteration, Call
 from devito.ir.iet.visitors import FindNodes
+from devito.ir.iet import Callable,Transformer
+
+from devito.types import Object
 
 from devito.symbolics.extended_sympy import ListInitializer
 from devito.ops.utils import namespace
 from devito.ops.types import OPSDeclObject
 from devito.ops.transformer import opsit, make_ops_ast
 
+from ctypes import c_double
 
 __all__ = ['Operator']
 
@@ -40,7 +44,9 @@ class Operator(OperatorRunnable):
             expr = expressions[0].expr           
 
             # Generate OPS kernels
-            a = opsit(trees)
+            ops_kernels = opsit(trees)
+
+            iet = Transformer(ops_kernels).visit(iet)
 
             """
             We need to create an `OPS grid`. 
@@ -128,5 +134,5 @@ class Operator(OperatorRunnable):
         #     print(od)
 
         # raise NotImplementedError
-
+        return iet
 

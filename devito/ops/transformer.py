@@ -1,8 +1,13 @@
 from sympy import Eq, symbols
 
-from devito.ir.iet.nodes import Expression
-from devito.ir.iet.visitors import FindNodes
+from numpy import float32
 
+from devito.types import Array
+from devito.dimension import Dimension
+
+from devito.ir.iet import Callable
+from devito.ir.iet.nodes import Expression, ClusterizedEq
+from devito.ir.iet.visitors import FindNodes
 
 from devito.ops.node_factory import Ops_node_factory
 from devito.ops.utils import namespace
@@ -32,10 +37,10 @@ def opsit(trees):
 
         for k, v in conditions:
             ops_expr = make_ops_ast(k, nfops, mapper)
-            print(ops_expr)                      
+            ops_kernel = create_new_ops_kernel(ops_expr)
 
             if ops_expr not in mapper:
-                mapper[k] = ops_expr
+                mapper[k] = ClusterizedEq(ops_expr)
 
     return mapper
 
@@ -75,4 +80,14 @@ def make_ops_ast(expr, nfops, mapper):
         raise NotImplementedError("Missing handler in Devito-OPS translation")
 
 
-def
+def create_new_ops_kernel(expr):
+
+    parameters = Array(name='ops', 
+                dimensions=[Dimension(name='ut0'), Dimension(name='ut1')],
+                dtype=[float32, float32])
+
+    return Callable(namespace['ops-kernel'], 
+                    expr,
+                    namespace['ops-kernel-retval'],
+                    [parameters] + list(parameters.shape),
+                    ('static',))
