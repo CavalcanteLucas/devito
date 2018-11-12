@@ -1,4 +1,5 @@
-from sympy import Eq, Symbol, Add, Mul, Integer, Float, Rational
+from sympy import Eq, Add, Mul, Integer, Float, Rational
+from devito.types import Symbol
 
 from devito.ops.utils import namespace
 
@@ -8,7 +9,15 @@ class Ops_node_factory():
     """
 
     def __init__(self):
-        self.grids = {}        
+        self.grids = {}    
+
+    def new_symbol(self, name):
+        """
+            Creates a new sympy Symbol object with the given name.
+
+            :param name: Name of the symbol to be created.
+        """
+        return Symbol(name=name)
 
     def new_int_node(self, number):
         """
@@ -72,7 +81,7 @@ class Ops_node_factory():
             symbol = self.grids[grid_id]
         else:            
             # FIXME Where can I get the 0,0 info?
-            symbol = Symbol('%s[%s%s(%s)]' % 
+            symbol = Symbol(name='%s[%s%s(%s)]' % 
                             (grid_id, namespace['ops_acc'], 
                              str(len(self.grids)), '0,0')) 
                      

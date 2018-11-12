@@ -2,9 +2,9 @@ from sympy import Function
 
 from devito.operator import OperatorRunnable
 from devito.ir.iet.utils import find_offloadable_trees
-from devito.ir.iet.nodes import Expression, Iteration, Call
+from devito.ir.iet.nodes import Expression, Iteration, Call, ClusterizedEq
 from devito.ir.iet.visitors import FindNodes
-from devito.ir.iet import Callable,Transformer
+from devito.ir.iet import Callable,Transformer, Node, Section, List, MetaCall
 
 from devito.types import Object
 
@@ -34,7 +34,7 @@ class Operator(OperatorRunnable):
         First things first.
         """
         ops_init_Object = Call(name=namespace['call-ops_init'], 
-                                params=(0, 'NULL', 1))
+                                params=(0, 'NULL', 1))            
 
 
         for (section, trees) in (find_offloadable_trees(iet).items()):
@@ -44,9 +44,33 @@ class Operator(OperatorRunnable):
             expr = expressions[0].expr           
 
             # Generate OPS kernels
-            ops_kernels = opsit(trees)
+            kernels = opsit(trees)
 
-            iet = Transformer(ops_kernels).visit(iet)
+            # iet = [kernels[0], iet]
+
+            # Mark the kernels as calls.
+            self._func_table[namespace['ops-kernel']] = MetaCall(kernels[0], True)
+
+            from devito import pprint
+            print('**********************************************************')
+            pprint(kernels[0])
+            print('**********************************************************')
+
+            # pprint(iet)
+            # print('**********************************************************')
+            # pprint(trees)
+            # print('**********************************************************')
+            # pprint(expressions)
+            # print('**********************************************************')
+
+            # my_ops_expr = [Expression(ClusterizedEq(kernels[0]))]
+
+            # pprint(my_ops_expr)
+
+            
+            # iet = Transformer({expressions[0] : my_ops_expr}).visit(iet)
+            # pprint(iet)
+
 
             """
             We need to create an `OPS grid`. 

@@ -39,10 +39,9 @@ def opsit(trees):
             ops_expr = make_ops_ast(k, nfops, mapper)
             ops_kernel = create_new_ops_kernel(ops_expr)
 
-            if ops_expr not in mapper:
-                mapper[k] = ClusterizedEq(ops_expr)
+            processed.append(ops_kernel)
 
-    return mapper
+    return processed
 
 def make_ops_ast(expr, nfops, mapper):
 
@@ -58,9 +57,9 @@ def make_ops_ast(expr, nfops, mapper):
         a, b = expr.as_numer_denom()
         return nfops.new_rational_node(float(a)/float(b))
     elif expr.is_Symbol:
-        # FIXME TALVEZ SEJA AQUI PRA ADICIONAR NO MAPPER
+        # FIXME Fabio's is adding this part to the mapper... should we?        
         if expr.function.is_Dimension:
-            return expr.name
+            return nfops.new_symbol(expr.name)
     elif expr.is_Mul:
         return nary2binary(expr.args, nfops.new_mul_node)
     elif expr.is_Add:
@@ -84,10 +83,10 @@ def create_new_ops_kernel(expr):
 
     parameters = Array(name='ops', 
                 dimensions=[Dimension(name='ut0'), Dimension(name='ut1')],
-                dtype=[float32, float32])
+                dtype=float32)
 
     return Callable(namespace['ops-kernel'], 
-                    expr,
+                    Expression(ClusterizedEq(expr)),
                     namespace['ops-kernel-retval'],
                     [parameters] + list(parameters.shape),
                     ('static',))
