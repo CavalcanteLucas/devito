@@ -46,31 +46,9 @@ class Operator(OperatorRunnable):
             # Generate OPS kernels
             kernels = opsit(trees)
 
-            # iet = [kernels[0], iet]
-
             # Mark the kernels as calls.
-            self._func_table[namespace['ops-kernel']] = MetaCall(kernels[0], True)
-
-            from devito import pprint
-            print('**********************************************************')
-            pprint(kernels[0])
-            print('**********************************************************')
-
-            # pprint(iet)
-            # print('**********************************************************')
-            # pprint(trees)
-            # print('**********************************************************')
-            # pprint(expressions)
-            # print('**********************************************************')
-
-            # my_ops_expr = [Expression(ClusterizedEq(kernels[0]))]
-
-            # pprint(my_ops_expr)
-
-            
-            # iet = Transformer({expressions[0] : my_ops_expr}).visit(iet)
-            # pprint(iet)
-
+            for index, kernel in enumerate(kernels):
+                self._func_table[namespace['ops-kernel'](index)] = MetaCall(kernel, True)
 
             """
             We need to create an `OPS grid`. 

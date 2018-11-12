@@ -2,7 +2,7 @@ from sympy import Eq, symbols
 
 from numpy import float32
 
-from devito.types import Array
+from devito.types import Array, Symbol
 from devito.dimension import Dimension
 
 from devito.ir.iet import Callable
@@ -81,12 +81,17 @@ def make_ops_ast(expr, nfops, mapper):
 
 def create_new_ops_kernel(expr):
 
-    parameters = Array(name='ops', 
-                dimensions=[Dimension(name='ut0'), Dimension(name='ut1')],
-                dtype=float32)
+    # parameters = Array(name='ops', 
+    #                    dimensions=[Dimension(name='ut0'), Dimension(name='ut1')],
+    #                    dtype=float32)
 
-    return Callable(namespace['ops-kernel'], 
+    parameters=[Array(name='ut0', dimensions=[], dtype=float32),
+                Array(name='ut1', dimensions=[], dtype=float32)]
+
+    # parameters = None 
+
+    return Callable(namespace['ops-kernel'](0), 
                     Expression(ClusterizedEq(expr)),
                     namespace['ops-kernel-retval'],
-                    [parameters] + list(parameters.shape),
+                    parameters,
                     ('static',))
