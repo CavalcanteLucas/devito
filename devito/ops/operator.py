@@ -27,6 +27,8 @@ class Operator(OperatorRunnable):
     A special :class:`OperatorCore` to JIT-compile and run operators through OPS.
     """
 
+    _default_includes = OperatorRunnable._default_includes + ['ops_seq.h', 'ops_lib_cpp.h']
+
     def _specialize_iet(self, iet, **kwargs):
         ops_data = []
 
