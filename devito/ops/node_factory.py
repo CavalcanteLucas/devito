@@ -1,4 +1,4 @@
-from sympy import Eq, Add, Mul, Integer, Float, Rational
+from sympy import Eq, Add, Mul, Pow, Integer, Float, Rational
 from devito.types import Symbol
 
 from devito.ops.utils import namespace
@@ -9,7 +9,7 @@ class Ops_node_factory():
     """
 
     def __init__(self):
-        self.grids = {}    
+        self.ops_access = {}    
 
     def new_symbol(self, name):
         """
@@ -64,6 +64,15 @@ class Ops_node_factory():
         """
         return Mul(lhs,rhs)
 
+    def new_divide_node(self, num, den):
+        """
+            Creates a new sympy Div object.
+
+            :param num: The division numerator.
+            :param den: The division denominator.
+        """
+        return Mul(num, Pow(den, Integer(-1)))
+
     def new_grid(self, name, dimensions):       
         """
             Creates a new grid access given a  variable name and its dimensions.
@@ -75,17 +84,34 @@ class Ops_node_factory():
                                the first parameter be the time dimension.
         """ 
 
-        grid_id = '%s%s' % (name,dimensions[0])
+        def getDimensionsDisplacement(dimensions):
+            disp = []
 
-        if grid_id in self.grids:
-            symbol = self.grids[grid_id]
+            for dim in dimensions:
+                if dim.is_Add:
+                    lhs, rhs = dim.as_two_terms()
+                    disp.append(str(lhs))
+                else:
+                    disp.append('0')                   
+
+            return disp
+
+        disp = getDimensionsDisplacement(dimensions[1:])
+
+        grid_id = '%s%s' % (name, dimensions[0])
+
+        # If the grid was alredy created, then use the same Access, 
+        # but we should look for different displacements.
+        if grid_id in self.ops_access:
+            ops_acc = self.ops_access[grid_id]
+            symbol =  Symbol(name='%s[%s(%s)]' % 
+                            (grid_id, ops_acc, ','.join(disp)))
         else:            
-            # FIXME Where can I get the 0,0 info?
             symbol = Symbol(name='%s[%s%s(%s)]' % 
                             (grid_id, namespace['ops_acc'], 
-                             str(len(self.grids)), '0,0')) 
-                     
-            self.grids[grid_id] = symbol            
+                             str(len(self.ops_access)), ','.join(disp)))                      
+            self.ops_access[grid_id] = '%s%s' % (namespace['ops_acc'], 
+                                                 str(len(self.ops_access)))
 
         return symbol
 

@@ -58,12 +58,24 @@ def make_ops_ast(expr, nfops, mapper):
         return nfops.new_rational_node(float(a)/float(b))
     elif expr.is_Symbol:
         # FIXME Fabio's is adding this part to the mapper... should we?        
-        if expr.function.is_Dimension:
-            return nfops.new_symbol(expr.name)
+        # TODO Should i differentiate dimensions from constants like yask? 
+        return nfops.new_symbol(expr.name)
     elif expr.is_Mul:
         return nary2binary(expr.args, nfops.new_mul_node)
     elif expr.is_Add:
         return nary2binary(expr.args, nfops.new_add_node)
+    elif expr.is_Pow:
+        base, exp = expr.as_base_exp()        
+
+        if not exp.is_integer:
+            raise NotImplementedError("Non-integer powers unsupported in "
+                                      "Devito-OPS translation")
+        if int(exp) < 0:
+            num, den = expr.as_numer_denom()
+            return nfops.new_divide_node(make_ops_ast(num, nfops, mapper),
+                                         make_ops_ast(den, nfops, mapper))
+        elif int(exp) >= 1:
+            return nary2binary([base] * exp, nfops.new_mul_node)
     elif expr.is_Equality:
         if expr.lhs.is_Symbol:
             function = expr.lhs.base.function
@@ -76,22 +88,20 @@ def make_ops_ast(expr, nfops, mapper):
                       for i in expr.indices]     
         return nfops.new_grid(expr.name, dimensions)
     else:
+        print(expr)
         raise NotImplementedError("Missing handler in Devito-OPS translation")
 
 
+# FIXME method comments.
 def create_new_ops_kernel(expr):
 
-    # parameters = Array(name='ops', 
-    #                    dimensions=[Dimension(name='ut0'), Dimension(name='ut1')],
-    #                    dtype=float32)
-
+    # FIXME Get this from the expr or another new parameter
     parameters=[Array(name='ut0', dimensions=[], dtype=float32),
                 Array(name='ut1', dimensions=[], dtype=float32)]
 
-    # parameters = None 
-
+    # FIXME Get from somewhere
     return Callable(namespace['ops-kernel'](0), 
                     Expression(ClusterizedEq(expr)),
                     namespace['ops-kernel-retval'],
                     parameters,
-                    ('static',))
+                    prefix=('const',))

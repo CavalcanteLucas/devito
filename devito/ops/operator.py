@@ -72,28 +72,28 @@ class Operator(OperatorRunnable):
 
             halo_mapper = {}
             fun = expressions[0].functions[0]  # TO DO: generalize for more Functions
-            for d, o in zip(fun.dimensions, fun._extent_halo):
-                if d.is_Time:
-                    pass
-                else:
-                    halo_mapper.setdefault(fun, {})
-                    halo_mapper[fun].setdefault('left', []).append(-o.left)
-                    halo_mapper[fun].setdefault('right', []).append(o.right)
-            ops_negBound_Object = ListInitializer(list(map(str, halo_mapper[fun]['left'])))
-            ops_posBound_Object = ListInitializer(list(map(str, halo_mapper[fun]['right'])))
+            # for d, o in zip(fun.dimensions, fun._extent_halo):
+            #     if d.is_Time:
+            #         pass
+            #     else:
+            #         halo_mapper.setdefault(fun, {})
+            #         halo_mapper[fun].setdefault('left', []).append(-o.left)
+            #         halo_mapper[fun].setdefault('right', []).append(o.right)
+            # ops_negBound_Object = ListInitializer(list(map(str, halo_mapper[fun]['left'])))
+            # ops_posBound_Object = ListInitializer(list(map(str, halo_mapper[fun]['right'])))
 
-            ops_dat_Object = OPSDeclObject(dtype = namespace['type-ops_dat'],
-                                            name = namespace['name-ops_dat'](''), 
-                                            value = Function(namespace['call-ops_dat'])
-                                                    (ops_grid_Object,
-                                                     1,
-                                                     ops_size_Object,
-                                                     ops_base_Object,
-                                                     ops_negBound_Object,
-                                                     ops_posBound_Object,
-                                                     fun.name,
-                                                     'double',
-                                                     namespace['name-ops_dat']('')))
+            # ops_dat_Object = OPSDeclObject(dtype = namespace['type-ops_dat'],
+            #                                 name = namespace['name-ops_dat'](''), 
+            #                                 value = Function(namespace['call-ops_dat'])
+            #                                         (ops_grid_Object,
+            #                                          1,
+            #                                          ops_size_Object,
+            #                                          ops_base_Object,
+            #                                          ops_negBound_Object,
+            #                                          ops_posBound_Object,
+            #                                          fun.name,
+            #                                          'double',
+            #                                          namespace['name-ops_dat']('')))
 
 
             ops_stencilWriterPts_Object = ListInitializer(['0','0'])
@@ -127,7 +127,7 @@ class Operator(OperatorRunnable):
             
             ops_data.append(ops_init_Object)
             ops_data.append(ops_grid_Object)
-            ops_data.append(ops_dat_Object)
+            # ops_data.append(ops_dat_Object)
             ops_data.append(ops_stencilWriter_Object)
             ops_data.append(ops_stencilReader_Object)
             ops_data.append(ops_parLoop_Object)
