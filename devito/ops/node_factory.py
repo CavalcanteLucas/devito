@@ -9,7 +9,7 @@ class Ops_node_factory():
     """
 
     def __init__(self):
-        self.ops_access = {}    
+        self.ops_access = {}
 
     def new_symbol(self, name):
         """
@@ -73,7 +73,7 @@ class Ops_node_factory():
         """
         return Mul(num, Pow(den, Integer(-1)))
 
-    def new_grid(self, name, dimensions):       
+    def new_grid(self, name, dimensions):
         """
             Creates a new grid access given a  variable name and its dimensions.
             If the pair grid name and time dimension was alredy created, it will return
@@ -92,7 +92,7 @@ class Ops_node_factory():
                     lhs, rhs = dim.as_two_terms()
                     disp.append(str(lhs))
                 else:
-                    disp.append('0')                   
+                    disp.append('0')
 
             return disp
 
@@ -109,11 +109,11 @@ class Ops_node_factory():
         else:            
             symbol = Symbol(name='%s[%s%s(%s)]' % 
                             (grid_id, namespace['ops_acc'], 
-                             str(len(self.ops_access)), ','.join(disp)))                      
+                             str(len(self.ops_access)), ','.join(disp)))
             self.ops_access[grid_id] = '%s%s' % (namespace['ops_acc'], 
                                                  str(len(self.ops_access)))
 
-        return symbol
+        return (symbol, grid_id)
 
 
     def new_equation_node(self, *args):
@@ -123,9 +123,3 @@ class Ops_node_factory():
             :param *args: arguments to construct the new equation.
         """
         return Eq(*args)
-
-
-
-
-        
-    
