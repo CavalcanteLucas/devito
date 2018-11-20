@@ -1,7 +1,4 @@
-from sympy import Eq, symbols
-
-from devito.types import Array, Symbol
-from devito.dimension import Dimension
+from devito.types import Array
 
 from devito.ir.iet import Callable
 from devito.ir.iet.nodes import Expression, ClusterizedEq
@@ -11,38 +8,38 @@ from devito.ops.node_factory import Ops_node_factory
 from devito.ops.utils import namespace
 
 
-
 def opsit(trees):
     """
     Populate the tree with OPS instructions.
 
-    :param trees: A sequence of offloadable :class: `IterationTree`s, in which the 
-                  Expressions are searched.                  
+    :param trees: A sequence of offloadable :class: `IterationTree`s, in which the
+                  Expressions are searched.
     """
-    #Track all OPS kernels created
+    # Track all OPS kernels created
     mapper = {}
     processed = []
     for tree in trees:
         # All expressions whithin `tree`
         expressions = [i.expr for i in FindNodes(Expression).visit(tree.inner)]
 
-         # Attach conditional expression for sub-domains
+        # Attach conditional expression for sub-domains
         conditions = [(i, []) for i in expressions]
 
-        # Only one node factory for all expression so we can keep track 
+        # Only one node factory for all expression so we can keep track
         # of all kernels generated.
-        nfops = Ops_node_factory()    
+        nfops = Ops_node_factory()
 
         count = 0
         for k, v in conditions:
             arguments = []
             ops_expr = make_ops_ast(k, nfops, mapper, arguments)
-            ops_kernel = create_new_ops_kernel(count,ops_expr, arguments)
+            ops_kernel = create_new_ops_kernel(count, ops_expr, arguments)
             count += 1
 
             processed.append(ops_kernel)
 
     return processed
+
 
 def make_ops_ast(expr, nfops, mapper, arguments):
 
@@ -58,15 +55,16 @@ def make_ops_ast(expr, nfops, mapper, arguments):
         a, b = expr.as_numer_denom()
         return nfops.new_rational_node(float(a)/float(b))
     elif expr.is_Symbol:
-        # FIXME Fabio's is adding this part to the mapper... should we?
-        # TODO Should i differentiate dimensions from constants like yask? Need a more complex example for test.
+        # FIXME Yask is adding this part to the mapper... should we?
+        # TODO Should i differentiate dimensions from constants
+        #      like yask? Need a more complex example for test.
         return nfops.new_symbol(expr.name)
     elif expr.is_Mul:
         return nary2binary(expr.args, nfops.new_mul_node)
     elif expr.is_Add:
         return nary2binary(expr.args, nfops.new_add_node)
     elif expr.is_Pow:
-        base, exp = expr.as_base_exp()        
+        base, exp = expr.as_base_exp()
 
         if not exp.is_integer:
             raise NotImplementedError("Non-integer powers unsupported in "
@@ -80,17 +78,16 @@ def make_ops_ast(expr, nfops, mapper, arguments):
     elif expr.is_Equality:
         if expr.lhs.is_Symbol:
             function = expr.lhs.base.function
-            mapper[function] = make_ops_ast(expr.rhs,nfops, mapper, arguments)
+            mapper[function] = make_ops_ast(expr.rhs, nfops, mapper, arguments)
         else:
             return nfops.new_equation_node(*[make_ops_ast(i, nfops, mapper, arguments)
                                              for i in expr.args])
     elif expr.is_Indexed:
-        dimensions = [make_ops_ast(i, nfops, mapper, arguments) 
+        dimensions = [make_ops_ast(i, nfops, mapper, arguments)
                       for i in expr.indices]
 
-        grid_access, grid_name =  nfops.new_grid(expr.name, dimensions)
-        # Don't need to specify dimensions because this a pointer to an array in ops.
-        arguments.append(Array(name=grid_name, dimensions=[], dtype=expr.dtype)) 
+        grid_access, grid_name = nfops.new_grid(expr.name, dimensions)
+        arguments.append(Array(name=grid_name, dimensions=[], dtype=expr.dtype))
         return grid_access
     else:
         print(expr)
@@ -105,9 +102,8 @@ def create_new_ops_kernel(count, expr, arguments):
         :param expr: OPS expression that will be inside the method.
         :param arguments: OPS method arguments.
     """
-  
-    return Callable(namespace['ops-kernel'](count), 
+
+    return Callable(namespace['ops-kernel'](count),
                     Expression(ClusterizedEq(expr)),
                     namespace['ops-kernel-retval'],
-                    arguments,
-                    prefix=('const',))
+                    arguments)
