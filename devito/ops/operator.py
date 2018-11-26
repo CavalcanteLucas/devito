@@ -48,8 +48,8 @@ class Operator(OperatorRunnable):
 
         # Inserts both ops init and exit into the iet.
         iterationInitial = FindNodes(Iteration).visit(iet)[0]
-        iet = Transformer({iterationInitial:List(body=[ops_init_Object,iterationInitial,ops_exit_Object])}).visit(iet)
-
+        iet = Transformer({iterationInitial: List(
+            body=[ops_init_Object, iterationInitial, ops_exit_Object])}).visit(iet)
 
         for (section, trees) in (find_offloadable_trees(iet).items()):
             node = trees[0].root

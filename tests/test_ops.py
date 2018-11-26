@@ -56,4 +56,4 @@ class TestOpsExpression(object):
         # Check code generation
         for _, func in op._func_table.items():
             equation = FindNodes(Expression).visit(func)
-            assert printAST(equation) == expected
+            assert printAST(equation) == str(expected)
