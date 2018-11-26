@@ -90,7 +90,7 @@ class Ops_node_factory():
 
             for dim in dimensions:
                 if dim.is_Add:
-                    lhs, rhs = dim.as_two_terms()
+                    lhs, = dim.as_two_terms()
                     disp.append(str(lhs))
                 else:
                     disp.append('0')

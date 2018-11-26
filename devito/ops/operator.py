@@ -134,14 +134,7 @@ class Operator(OperatorRunnable):
             ops_parLoop_Object = Call(name=namespace['call-ops_par_loop'],
                                       params=[2, Array(name='u', dimensions=[Dimension(name='t0')], dtype=float32)])
 
-            from devito.tools import pprint
-
-            pprint(iet)
-            print('**************************************')
-            print(ops_parLoop_Object)
-            print('**************************************')
             mapper = {iterations[0]: ops_parLoop_Object}
-            pprint(iet)
 
             ops_data.append(ops_grid_Object)
             # ops_data.append(ops_dat_Object)
