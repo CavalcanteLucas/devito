@@ -449,7 +449,7 @@ class SubDimension(DerivedDimension):
         The thickness of the left and right regions, respectively.
     local : bool
         True if, in case of domain decomposition, the SubDimension is
-        guaranteed not to span more than one domains, False otherwise.
+        guaranteed not to span more than one domain, False otherwise.
 
     Examples
     --------
