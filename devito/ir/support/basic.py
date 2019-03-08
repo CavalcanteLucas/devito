@@ -293,7 +293,7 @@ class IterationInstance(Vector):
         """
         aindex = self.aindices[findex]
 
-        # If the iterator is *not* a distributed Dimension, then surely the
+        # If the iterator is *not* a distributed Dimension, then the
         # halo isn't touched
         try:
             if not aindex._maybe_distributed:
@@ -303,9 +303,9 @@ class IterationInstance(Vector):
 
         # Given `d` \in aindices, iterating over [0, size_d):
         # * if `self[d] - d < self.function._size_halo[d].left`, then `self` will
-        #   definitely touch the left-halo when `d=0`
+        #   touch the left-halo when `d=0`
         # * if `self[d] - d > self.function._size_halo[d].left`, then `self` will
-        #   definitely touch the right-halo when `d=size_d-1`
+        #   touch the right-halo when `d=size_d-1`
         size_halo_left = self.function._size_halo[findex].left
         try:
             touch_halo_left = bool(self[findex] - aindex < size_halo_left)
