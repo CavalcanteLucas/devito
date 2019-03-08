@@ -118,6 +118,12 @@ class PrintAST(Visitor):
         else:
             return self.indent + str(o)
 
+    def visit_ForeignExpression(self, o):
+        if self.verbose:
+            return self.indent + "<Expression %s>" % o.expr
+        else:
+            return self.indent + str(o)
+
     def visit_HaloSpot(self, o):
         self._depth += 1
         body = self._visit(o.children)
@@ -216,7 +222,7 @@ class CGen(Visitor):
         return c.Statement(ccode(o.expr))
 
     def visit_Call(self, o):
-        arguments = self._args_call(o.params)
+        arguments = self._args_call(o.arguments)
         return c.Statement('%s(%s)' % (o.name, ','.join(arguments)))
 
     def visit_Conditional(self, o):
@@ -278,8 +284,7 @@ class CGen(Visitor):
 
     def visit_Callable(self, o):
         body = flatten(self._visit(i) for i in o.children)
-        params = o.parameters
-        decls = self._args_decl(params)
+        decls = self._args_decl(o.parameters)
         signature = c.FunctionDeclaration(c.Value(o.retval, o.name), decls)
         return c.FunctionBody(signature, c.Block(body))
 
@@ -337,6 +342,8 @@ class FindSections(Visitor):
         for i in o:
             ret = self._visit(i, ret=ret, queue=queue)
         return ret
+
+    visit_list = visit_tuple
 
     def visit_Node(self, o, ret=None, queue=None):
         if ret is None:
@@ -491,6 +498,8 @@ class FindSymbols(Visitor):
         symbols = flatten([self._visit(i) for i in o])
         return filter_sorted(symbols, key=attrgetter('name'))
 
+    visit_list = visit_tuple
+
     def visit_Iteration(self, o):
         symbols = flatten([self._visit(i) for i in o.children])
         symbols += self.rule(o)
@@ -544,6 +553,8 @@ class FindNodes(Visitor):
             ret = self._visit(i, ret=ret)
         return ret
 
+    visit_list = visit_tuple
+
     def visit_Node(self, o, ret=None):
         if ret is None:
             ret = self.default_retval()
@@ -568,7 +579,7 @@ class FindAdjacent(Visitor):
 
     def __init__(self, match):
         super(FindAdjacent, self).__init__()
-        self.match = match
+        self.match = as_tuple(match)
 
     def handler(self, o, parent=None, ret=None):
         if ret is None:
@@ -602,7 +613,7 @@ class FindAdjacent(Visitor):
 
     def visit_Node(self, o, parent=None, ret=None):
         ret = self.handler(o.children, parent=o, ret=ret)
-        ret['seen_type'] = type(o) is self.match
+        ret['seen_type'] = type(o) in self.match
         return ret
 
 

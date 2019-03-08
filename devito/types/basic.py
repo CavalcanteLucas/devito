@@ -874,13 +874,27 @@ class Object(AbstractObject, ArgProvider):
         super(Object, self).__init__(name, dtype)
         self.value = value
 
+    @property
+    def _arg_names(self):
+        return (self.name,)
+
     def _arg_defaults(self):
         if callable(self.value):
             return {self.name: self.value()}
         else:
             return {self.name: self.value}
 
-    def _arg_values(self, **kwargs):
+    def _arg_values(self, args, **kwargs):
+        """
+        Produce runtime values for this Object after evaluating user input.
+
+        Parameters
+        ----------
+        args : dict
+            Known argument values.
+        **kwargs
+            Dictionary of user-provided argument overrides.
+        """
         if self.name in kwargs:
             return {self.name: kwargs.pop(self.name)}
         else:
@@ -904,8 +918,11 @@ class CompositeObject(Object):
 
     def __init__(self, name, pname, pfields, value=None):
         dtype = CompositeObject._generate_unique_dtype(pname, pfields)
-        value = value or byref(dtype._type_())
+        value = self.__value_setup__(dtype, value)
         super(CompositeObject, self).__init__(name, dtype, value)
+
+    def __value_setup__(self, dtype, value):
+        return value or byref(dtype._type_())
 
     @property
     def pfields(self):
