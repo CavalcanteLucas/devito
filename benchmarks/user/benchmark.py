@@ -3,11 +3,39 @@ import sys
 
 import numpy as np
 import click
+import os
+from devito import clear_cache, configuration, warning, set_log_level
+from devito.mpi import MPI
+from devito.tools import as_tuple, sweep
+from examples.seismic.acoustic.acoustic_example import run as acoustic_run, acoustic_setup
+from examples.seismic.tti.tti_example import run as tti_run, tti_setup
+from examples.seismic.elastic.elastic_example import run as elastic_run, elastic_setup
+from examples.seismic.viscoelastic.viscoelastic_example import run as viscoelastic_run, \
+    viscoelastic_setup
 
-from devito import clear_cache, configuration, sweep, mode_develop, mode_benchmark
-from devito.logger import warning
-from examples.seismic.acoustic.acoustic_example import run as acoustic_run
-from examples.seismic.tti.tti_example import run as tti_run
+
+model_type = {
+    'viscoelastic': {
+        'run': viscoelastic_run,
+        'setup': viscoelastic_setup,
+        'default-section': 'section0'
+    },
+    'elastic': {
+        'run': elastic_run,
+        'setup': elastic_setup,
+        'default-section': 'section0'
+    },
+    'tti': {
+        'run': tti_run,
+        'setup': tti_setup,
+        'default-section': 'section1'
+    },
+    'acoustic': {
+        'run': acoustic_run,
+        'setup': acoustic_setup,
+        'default-section': 'section0'
+    }
+}
 
 
 @click.group()
@@ -31,7 +59,8 @@ def option_simulation(f):
         return list(value if len(value) > 0 else (2, ))
 
     options = [
-        click.option('-P', '--problem', type=click.Choice(['acoustic', 'tti']),
+        click.option('-P', '--problem', type=click.Choice(['acoustic', 'tti',
+                                                           'elastic', 'viscoelastic']),
                      help='Problem name'),
         click.option('-d', '--shape', default=(50, 50, 50),
                      help='Number of grid points along each axis'),
@@ -44,7 +73,7 @@ def option_simulation(f):
         click.option('-to', '--time-order', type=int, multiple=True,
                      callback=default_list, help='Time order of the simulation'),
         click.option('-t', '--tn', default=250,
-                     help='End time of the simulation in ms'),
+                     help='End time of the simulation in ms')
     ]
     for option in reversed(options):
         f = option(f)
@@ -56,12 +85,11 @@ def option_performance(f):
 
     _preset = {
         # Fixed
-        'O1': {'dse': 'basic', 'dle': 'basic'},
+        'O1': {'dse': 'basic', 'dle': 'advanced'},
         'O2': {'dse': 'advanced', 'dle': 'advanced'},
         'O3': {'dse': 'aggressive', 'dle': 'advanced'},
         # Parametric
         'dse': {'dse': ['basic', 'advanced', 'aggressive'], 'dle': 'advanced'},
-        'dle': {'dse': 'advanced', 'dle': ['basic', 'advanced']}
     }
 
     def from_preset(ctx, param, value):
@@ -73,10 +101,34 @@ def option_performance(f):
         """Prefer preset values and warn for competing values."""
         return ctx.params[param.name] or value
 
+    def config_blockshape(ctx, param, value):
+        if value:
+            # Block innermost loops if a full block shape is provided
+            configuration['dle-options']['blockinner'] = True
+        return value
+
+    def config_autotuning(ctx, param, value):
+        """Setup auto-tuning to run in ``{basic,aggressive,...}+preemptive`` mode."""
+        if value != 'off':
+            # Sneak-peek at the `block-shape` -- if provided, keep auto-tuning off
+            if ctx.params['block_shape']:
+                warning("Skipping autotuning (using explicit block-shape `%s`)"
+                        % str(ctx.params['block_shape']))
+                level = False
+            else:
+                # Make sure to always run in preemptive mode
+                configuration['autotuning'] = [value, 'preemptive']
+                # We apply blocking to all parallel loops, including the innermost ones
+                configuration['dle-options']['blockinner'] = True
+                level = value
+        else:
+            level = False
+        return level
+
     options = [
         click.option('-bm', '--bench-mode', is_eager=True,
                      callback=from_preset, expose_value=False, default='O2',
-                     type=click.Choice(['O1', 'O2', 'O3', 'dse', 'dle']),
+                     type=click.Choice(['O1', 'O2', 'O3', 'dse']),
                      help='Choose what to benchmark; ignored if execmode=run'),
         click.option('--arch', default='unknown',
                      help='Architecture on which the simulation is/was run'),
@@ -86,6 +138,11 @@ def option_performance(f):
         click.option('--dle', callback=from_value,
                      type=click.Choice(['noop'] + configuration._accepted['dle']),
                      help='Devito loop engine (DLE) mode'),
+        click.option('-bs', '--block-shape', callback=config_blockshape, multiple=True,
+                     is_eager=True, help='Loop-blocking shape, bypass autotuning'),
+        click.option('-a', '--autotune', default='aggressive', callback=config_autotuning,
+                     type=click.Choice(configuration._accepted['autotuning']),
+                     help='Select autotuning mode')
     ]
     for option in reversed(options):
         f = option(f)
@@ -95,13 +152,12 @@ def option_performance(f):
 @benchmark.command(name='run')
 @option_simulation
 @option_performance
-@click.option('-a', '--autotune', is_flag=True,
-              help='Switch auto tuning on/off')
 def cli_run(problem, **kwargs):
     """
     A single run with a specific set of performance parameters.
     """
-    mode_benchmark()
+    configuration['develop-mode'] = False
+
     run(problem, **kwargs)
 
 
@@ -109,22 +165,44 @@ def run(problem, **kwargs):
     """
     A single run with a specific set of performance parameters.
     """
-    run = tti_run if problem == 'tti' else acoustic_run
+    setup = model_type[problem]['setup']
+    options = {}
+
     time_order = kwargs.pop('time_order')[0]
     space_order = kwargs.pop('space_order')[0]
-    run(space_order=space_order, time_order=time_order, **kwargs)
+    autotune = kwargs.pop('autotune')
+    block_shapes = as_tuple(kwargs.pop('block_shape'))
+
+    # Should a specific block-shape be used? Useful if one wants to skip
+    # the autotuning pass as a good block-shape is already known
+    if block_shapes:
+        # The following piece of code is horribly hacky, but it works for now
+        for i, block_shape in enumerate(block_shapes):
+            bs = [int(x) for x in block_shape.split()]
+            # If hierarchical blocking is activated, say with N levels, here in
+            # `bs` we expect to see 3*N entries
+            levels = [bs[x:x+3] for x in range(0, len(bs), 3)]
+            for n, level in enumerate(levels):
+                if len(level) != 3:
+                    raise ValueError("Expected 3 entries per block shape level, "
+                                     "but got one level with only %s entries (`%s`)"
+                                     % (len(level), level))
+                for d, s in zip(['x', 'y', 'z'], level):
+                    options['%s%d_blk%d_size' % (d, i, n)] = s
+
+    solver = setup(space_order=space_order, time_order=time_order, **kwargs)
+    solver.forward(autotune=autotune, **options)
 
 
 @benchmark.command(name='test')
 @option_simulation
 @option_performance
-@click.option('-a', '--autotune', is_flag=True,
-              help='Switch auto tuning on/off')
 def cli_test(problem, **kwargs):
     """
     Test numerical correctness with different parameters.
     """
-    mode_develop()
+    set_log_level('ERROR')
+
     test(problem, **kwargs)
 
 
@@ -132,7 +210,7 @@ def test(problem, **kwargs):
     """
     Test numerical correctness with different parameters.
     """
-    run = tti_run if problem == 'tti' else acoustic_run
+    run = model_type[problem]['run']
     sweep_options = ('space_order', 'time_order', 'dse', 'dle', 'autotune')
 
     last_res = None
@@ -148,18 +226,18 @@ def test(problem, **kwargs):
 
 
 @benchmark.command(name='bench')
-@option_simulation
-@option_performance
 @click.option('-r', '--resultsdir', default='results',
               help='Directory containing results')
 @click.option('-x', '--repeats', default=3,
               help='Number of test case repetitions')
+@option_simulation
+@option_performance
 def cli_bench(problem, **kwargs):
     """
     Complete benchmark with multiple simulation and performance parameters.
     """
-    mode_benchmark()
-    kwargs['autotune'] = configuration['autotuning'].level
+    configuration['develop-mode'] = False
+
     bench(problem, **kwargs)
 
 
@@ -167,7 +245,7 @@ def bench(problem, **kwargs):
     """
     Complete benchmark with multiple simulation and performance parameters.
     """
-    run = tti_run if problem == 'tti' else acoustic_run
+    run = model_type[problem]['run']
     resultsdir = kwargs.pop('resultsdir')
     repeats = kwargs.pop('repeats')
 
@@ -180,9 +258,6 @@ def bench(problem, **kwargs):
 
 
 @benchmark.command(name='plot')
-@option_simulation
-@option_performance
-@click.option('--autotune', type=str, help='Used auto-tuning level')
 @click.option('--backend', default='core',
               type=click.Choice(configuration._accepted['backend']),
               help='Used execution backend (e.g., core, yask)')
@@ -197,6 +272,10 @@ def bench(problem, **kwargs):
                    'ceil was obtained (ideal peak, linpack, ...)')
 @click.option('--point-runtime', is_flag=True, default=True,
               help='Annotate points with runtime values')
+@click.option('--section', default=None,
+              help='Code section for which the roofline is plotted')
+@option_simulation
+@option_performance
 def cli_plot(problem, **kwargs):
     """
     Plotting mode to generate plots for performance analysis.
@@ -213,11 +292,18 @@ def plot(problem, **kwargs):
     max_bw = kwargs.pop('max_bw')
     flop_ceils = kwargs.pop('flop_ceil')
     point_runtime = kwargs.pop('point_runtime')
+    autotune = kwargs['autotune']
 
     arch = kwargs['arch']
     space_order = "[%s]" % ",".join(str(i) for i in kwargs['space_order'])
     time_order = kwargs['time_order']
     shape = "[%s]" % ",".join(str(i) for i in kwargs['shape'])
+
+    section = kwargs.pop('section')
+    if not section:
+        warning("No `section` provided. Using `%s`'s default `%s`"
+                % (problem, model_type[problem]['default-section']))
+        section = model_type[problem]['default-section']
 
     RooflinePlotter = get_ob_plotter()
     bench = get_ob_bench(problem, resultsdir, kwargs)
@@ -227,17 +313,17 @@ def plot(problem, **kwargs):
         warning("Could not load any results, nothing to plot. Exiting...")
         sys.exit(0)
 
-    gflopss = bench.lookup(params=kwargs, measure="gflopss", event='main')
-    oi = bench.lookup(params=kwargs, measure="oi", event='main')
-    time = bench.lookup(params=kwargs, measure="timings", event='main')
+    gflopss = bench.lookup(params=kwargs, measure="gflopss", event=section)
+    oi = bench.lookup(params=kwargs, measure="oi", event=section)
+    time = bench.lookup(params=kwargs, measure="timings", event=section)
 
     # What plot am I?
     modes = [i for i in ['dse', 'dle', 'autotune']
              if len(set(dict(j)[i] for j in gflopss)) > 1]
 
     # Filename
-    figname = "%s_dim%s_so%s_to%s_arch[%s]_bkend[%s].pdf" % (
-        problem, shape, space_order, time_order, arch, backend
+    figname = "%s_dim%s_so%s_to%s_arch[%s]_bkend[%s]_at[%s]pdf" % (
+        problem, shape, space_order, time_order, arch, backend, autotune
     )
 
     # Legend setup. Do not plot a legend if there's no variation in performance
@@ -296,7 +382,7 @@ def plot(problem, **kwargs):
 
 
 def get_ob_bench(problem, resultsdir, parameters):
-    """Return a special :class:`opescibench.Benchmark` to manage performance runs."""
+    """Return a special ``opescibench.Benchmark`` to manage performance runs."""
     try:
         from opescibench import Benchmark
     except:
@@ -316,13 +402,27 @@ def get_ob_bench(problem, resultsdir, parameters):
             devito_params['dse'] = params['dse']
             devito_params['dle'] = params['dle']
             devito_params['at'] = params['autotune']
+
+            if configuration['openmp']:
+                default_nthreads = configuration['platform'].cores_physical
+                devito_params['nt'] = os.environ.get('OMP_NUM_THREADS', default_nthreads)
+            else:
+                devito_params['nt'] = 1
+
+            if configuration['mpi']:
+                devito_params['np'] = MPI.COMM_WORLD.size
+                devito_params['rank'] = MPI.COMM_WORLD.rank
+            else:
+                devito_params['np'] = 1
+                devito_params['rank'] = 0
+
             return '_'.join(['%s[%s]' % (k, v) for k, v in devito_params.items()])
 
     return DevitoBenchmark(name=problem, resultsdir=resultsdir, parameters=parameters)
 
 
 def get_ob_exec(func):
-    """Return a special :class:`opescibench.Executor` to execute performance runs."""
+    """Return a special ``opescibench.Executor`` to execute performance runs."""
     try:
         from opescibench import Executor
     except:
@@ -332,7 +432,7 @@ def get_ob_exec(func):
     class DevitoExecutor(Executor):
 
         def __init__(self, func):
-            super(DevitoExecutor, self).__init__()
+            super(DevitoExecutor, self).__init__(comm=MPI.COMM_WORLD)
             self.func = func
 
         def run(self, *args, **kwargs):
@@ -341,9 +441,9 @@ def get_ob_exec(func):
             gflopss, oi, timings, _ = self.func(*args, **kwargs)
 
             for key in timings.keys():
-                self.register(gflopss[key], measure="gflopss", event=key)
-                self.register(oi[key], measure="oi", event=key)
-                self.register(timings[key], measure="timings", event=key)
+                self.register(gflopss[key], measure="gflopss", event=key.name)
+                self.register(oi[key], measure="oi", event=key.name)
+                self.register(timings[key], measure="timings", event=key.name)
 
     return DevitoExecutor(func)
 
@@ -360,4 +460,21 @@ def get_ob_plotter():
 
 
 if __name__ == "__main__":
+    # If running with MPI, we emit logging messages from rank0 only
+    try:
+        MPI.Init()  # Devito starts off with MPI disabled!
+        set_log_level('DEBUG', comm=MPI.COMM_WORLD)
+
+        if MPI.COMM_WORLD.size > 1 and not configuration['mpi']:
+            warning("It seems that you're running over MPI with %d processes, but "
+                    "DEVITO_MPI is unset. Setting `DEVITO_MPI=basic`..."
+                    % MPI.COMM_WORLD.size)
+            configuration['mpi'] = 'basic'
+    except TypeError:
+        # MPI not available
+        pass
+
+    # Profiling at max level
+    configuration['profiling'] = 'advanced'
+
     benchmark()

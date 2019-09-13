@@ -4,27 +4,26 @@ import abc
 import inspect
 import numbers
 from cached_property import cached_property
-from collections import Iterable, OrderedDict, namedtuple
+from collections import OrderedDict, namedtuple
+from collections.abc import Iterable
 
 import cgen as c
 
-from devito.cgen_utils import ccode
 from devito.data import FULL
 from devito.ir.equations import ClusterizedEq
 from devito.ir.iet import (IterationProperty, SEQUENTIAL, PARALLEL, PARALLEL_IF_ATOMIC,
-                           VECTOR, WRAPPABLE, AFFINE, USELESS, OVERLAPPABLE)
+                           VECTOR, WRAPPABLE, ROUNDABLE, AFFINE, OVERLAPPABLE)
 from devito.ir.support import Forward, detect_io
-from devito.parameters import configuration
-from devito.symbolics import FunctionFromPointer, as_symbol
+from devito.symbolics import ListInitializer, FunctionFromPointer, as_symbol, ccode
 from devito.tools import (Signer, as_tuple, filter_ordered, filter_sorted, flatten,
                           validate_type, dtype_to_cstr)
 from devito.types import Symbol, Indexed
 from devito.types.basic import AbstractFunction
 
-__all__ = ['Node', 'Block', 'Denormals', 'Expression', 'Element', 'Callable',
-           'Call', 'Conditional', 'Iteration', 'List', 'LocalExpression', 'Section',
-           'TimedList', 'MetaCall', 'ArrayCast', 'ForeignExpression', 'HaloSpot',
-           'IterationTree', 'ExpressionBundle', 'Increment']
+__all__ = ['Node', 'Block', 'Expression', 'Element', 'Callable', 'Call', 'Conditional',
+           'Iteration', 'List', 'LocalExpression', 'Section', 'TimedList', 'Prodder',
+           'MetaCall', 'ArrayCast', 'ForeignExpression', 'HaloSpot', 'IterationTree',
+           'ExpressionBundle', 'Increment', 'Return']
 
 # First-class IET nodes
 
@@ -129,6 +128,19 @@ class Node(Signer):
         return (str(self.ccode),)
 
 
+# Some useful mixins
+
+
+class Simple(object):
+
+    """
+    A mixin to decorate Nodes that do *not* contain other Nodes (IOW,
+    their ``_traversable`` list is empty).
+    """
+
+    pass
+
+
 class Block(Node):
 
     """A sequence of nodes, wrapped in a block {...}."""
@@ -184,7 +196,7 @@ class Element(Node):
         return "Element::\n\t%s" % (self.element)
 
 
-class Call(Node):
+class Call(Simple, Node):
 
     """A function call."""
 
@@ -200,6 +212,10 @@ class Call(Node):
     @property
     def functions(self):
         return tuple(i for i in self.arguments if isinstance(i, AbstractFunction))
+
+    @property
+    def children(self):
+        return tuple(i for i in self.arguments if isinstance(i, Call))
 
     @cached_property
     def free_symbols(self):
@@ -218,7 +234,7 @@ class Call(Node):
         return ()
 
 
-class Expression(Node):
+class Expression(Simple, Node):
 
     """A node encapsulating a ClusterizedEq."""
 
@@ -226,12 +242,12 @@ class Expression(Node):
 
     @validate_type(('expr', ClusterizedEq))
     def __init__(self, expr):
-        self.expr = expr
-        self.__expr_finalize__()
+        self.__expr_finalize__(expr)
 
-    def __expr_finalize__(self):
+    def __expr_finalize__(self, expr):
         """Finalize the Expression initialization."""
-        self._functions = tuple(filter_ordered(flatten(detect_io(self.expr, relax=True))))
+        self._expr = expr
+        self._reads, _ = detect_io(expr, relax=True)
         self._dimensions = flatten(i.indices for i in self.functions if i.is_Indexed)
         self._dimensions = tuple(filter_ordered(self._dimensions))
 
@@ -240,17 +256,26 @@ class Expression(Node):
                              filter_ordered([f.func for f in self.functions]))
 
     @property
+    def expr(self):
+        return self._expr
+
+    @property
     def dtype(self):
         return self.expr.dtype
 
     @property
     def output(self):
-        """The symbol this Expression writes to."""
+        """The Symbol/Indexed this Expression writes to."""
         return self.expr.lhs
 
     @property
+    def reads(self):
+        """The Functions read by the Expression."""
+        return self._reads
+
+    @property
     def write(self):
-        """The Function this Expression writes to."""
+        """The Function written by the Expression."""
         return self.expr.lhs.function
 
     @property
@@ -268,21 +293,27 @@ class Expression(Node):
         return not self.is_scalar
 
     @property
-    def is_scalar_assign(self):
-        """True if a scalar, non-increment expression."""
-        return self.is_scalar and not self.is_Increment
+    def is_definition(self):
+        """
+        True if it is an assignment, False otherwise
+        """
+        return ((self.is_scalar and not self.is_Increment) or
+                (self.is_tensor and isinstance(self.expr.rhs, ListInitializer)))
 
     @property
     def defines(self):
-        return (self.write,) if self.is_scalar else ()
+        return (self.write,) if self.is_definition else ()
 
     @property
     def free_symbols(self):
         return tuple(self.expr.free_symbols)
 
-    @property
+    @cached_property
     def functions(self):
-        return self._functions
+        functions = list(self._reads)
+        if self.write is not None:
+            functions.append(self.write)
+        return tuple(filter_ordered(functions))
 
 
 class Increment(Expression):
@@ -354,7 +385,7 @@ class Iteration(Node):
         self.properties = as_tuple(filter_sorted(properties))
         self.pragmas = as_tuple(pragmas)
         self.uindices = as_tuple(uindices)
-        assert all(i.is_Derived and i.root is self.dim for i in self.uindices)
+        assert all(i.is_Derived and self.dim in i._defines for i in self.uindices)
 
     def __repr__(self):
         properties = ""
@@ -395,6 +426,10 @@ class Iteration(Node):
         return WRAPPABLE in self.properties
 
     @property
+    def is_Roundable(self):
+        return ROUNDABLE in self.properties
+
+    @property
     def ncollapsed(self):
         for i in self.properties:
             if i.name == 'collapsed':
@@ -416,7 +451,7 @@ class Iteration(Node):
         except TypeError:
             # A symbolic expression
             pass
-        return (_min + as_symbol(self.offsets[0]), _max + as_symbol(self.offsets[1]))
+        return (_min + self.offsets[0], _max + self.offsets[1])
 
     @property
     def symbolic_size(self):
@@ -616,20 +651,6 @@ class TimedList(List):
         return (self.timer,)
 
 
-class Denormals(List):
-
-    """Macros to make sure denormal numbers are flushed in hardware."""
-
-    def __init__(self, header=None, body=None, footer=None):
-        b = [Element(c.Comment('Flush denormal numbers to zero in hardware')),
-             Element(c.Statement('_MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON)')),
-             Element(c.Statement('_MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON)'))]
-        super(Denormals, self).__init__(header, b, footer)
-
-    def __repr__(self):
-        return "<DenormalsMacro>"
-
-
 class ArrayCast(Node):
 
     """
@@ -642,7 +663,7 @@ class ArrayCast(Node):
     @property
     def castshape(self):
         """The shape used in the left-hand side and right-hand side of the ArrayCast."""
-        if configuration['codegen'] == 'explicit' or self.function.is_Array:
+        if self.function.is_Array:
             return self.function.symbolic_shape[1:]
         else:
             return tuple(self.function._C_get_field(FULL, d).size
@@ -659,7 +680,7 @@ class ArrayCast(Node):
 
         This may include DiscreteFunctions as well as Dimensions.
         """
-        if configuration['codegen'] == 'explicit' or self.function.is_Array:
+        if self.function.is_Array:
             sizes = flatten(s.free_symbols for s in self.function.symbolic_shape[1:])
             return (self.function, ) + as_tuple(sizes)
         else:
@@ -690,10 +711,9 @@ class ForeignExpression(Expression):
     @validate_type(('expr', FunctionFromPointer),
                    ('dtype', type))
     def __init__(self, expr, dtype, **kwargs):
-        self.expr = expr
         self._dtype = dtype
         self._is_increment = kwargs.get('is_Increment', False)
-        self.__expr_finalize__()
+        self.__expr_finalize__(expr)
 
     @property
     def dtype(self):
@@ -757,9 +777,9 @@ class ExpressionBundle(List):
 
     is_ExpressionBundle = True
 
-    def __init__(self, shape, ops, traffic, body=None):
+    def __init__(self, ispace, ops, traffic, body=None):
         super(ExpressionBundle, self).__init__(body=body)
-        self.shape = shape
+        self.ispace = ispace
         self.ops = ops
         self.traffic = traffic
 
@@ -769,6 +789,41 @@ class ExpressionBundle(List):
     @property
     def exprs(self):
         return self.body
+
+    @property
+    def shape(self):
+        return tuple(self.ispace.dimension_map.values())
+
+
+class Prodder(Call):
+
+    """
+    A Call promoting asynchronous progress, to minimize latency.
+
+    Example use cases:
+
+        * To trigger asynchronous progress in the case of distributed-memory
+          parallelism.
+        * Software prefetching.
+    """
+
+    def __init__(self, name, arguments=None, single_thread=False, periodic=False):
+        super(Prodder, self).__init__(name, arguments)
+
+        # Prodder properties
+        self._single_thread = single_thread
+        self._periodic = periodic
+
+    @property
+    def single_thread(self):
+        return self._single_thread
+
+    @property
+    def periodic(self):
+        return self._periodic
+
+
+Return = lambda i='': Element(c.Statement('return%s' % ((' %s' % i) if i else i)))
 
 
 # Nodes required for distributed-memory halo exchange
@@ -792,6 +847,8 @@ class HaloSpot(Node):
             self._body = body
         elif isinstance(body, (list, tuple)) and len(body) == 1:
             self._body = body[0]
+        elif body is None:
+            self._body = List()
         else:
             raise ValueError("`body` is expected to be a single Node")
         self._properties = as_tuple(properties)
@@ -820,6 +877,10 @@ class HaloSpot(Node):
         return self.halo_scheme.dimensions
 
     @property
+    def arguments(self):
+        return self.halo_scheme.arguments
+
+    @property
     def is_empty(self):
         return len(self.halo_scheme) == 0
 
@@ -839,8 +900,11 @@ class HaloSpot(Node):
         return ()
 
     @property
-    def is_Useless(self):
-        return USELESS in self.properties
+    def useless(self):
+        for i in self.properties:
+            if i.name == 'useless':
+                return i.val
+        return ()
 
     @property
     def is_Overlappable(self):

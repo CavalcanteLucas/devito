@@ -1,27 +1,151 @@
+from itertools import groupby, product
+
 import cgen as c
 import numpy as np
 from cached_property import cached_property
 
-from devito.ir.iet import (Expression, Iteration, List, FindAdjacent,
-                           FindNodes, IsPerfectIteration, Transformer,
-                           compose_nodes, retrieve_iteration_tree)
-from devito.logger import warning
+from devito.ir.iet import (Expression, Iteration, List, FindAdjacent, FindNodes,
+                           IsPerfectIteration, Transformer, PARALLEL, AFFINE, make_efunc,
+                           compose_nodes, filter_iterations, retrieve_iteration_tree)
+from devito.exceptions import InvalidArgument
 from devito.symbolics import as_symbol, xreplace_indices
-from devito.tools import as_tuple, flatten
+from devito.tools import all_equal, as_tuple, flatten
 from devito.types import IncrDimension, Scalar
 
-__all__ = ['BlockDimension', 'fold_blockable_tree', 'unfold_blocked_tree']
+__all__ = ['Blocker', 'BlockDimension']
 
 
-def fold_blockable_tree(node, blockinner=True):
+class Blocker(object):
+
+    def __init__(self, blockinner, blockalways, nlevels):
+        self.blockinner = bool(blockinner)
+        self.blockalways = bool(blockalways)
+        self.nlevels = nlevels
+
+        self.nblocked = 0
+
+    def make_blocking(self, iet):
+        """
+        Apply loop blocking to PARALLEL Iteration trees.
+        """
+        # Make sure loop blocking will span as many Iterations as possible
+        iet = fold_blockable_tree(iet, self.blockinner)
+
+        mapper = {}
+        efuncs = []
+        block_dims = []
+        for tree in retrieve_iteration_tree(iet):
+            # Is the Iteration tree blockable ?
+            iterations = filter_iterations(tree, lambda i: i.is_Parallel and i.is_Affine)
+            if not self.blockinner:
+                iterations = iterations[:-1]
+            if len(iterations) <= 1:
+                continue
+            root = iterations[0]
+            if not self.blockalways:
+                # Heuristically bypass loop blocking if we think `tree`
+                # won't be computationally expensive. This will help with code
+                # size/readbility, JIT time, and auto-tuning time
+                if not (tree.root.is_Sequential or iet.is_Callable):
+                    # E.g., not inside a time-stepping Iteration
+                    continue
+                if any(i.dim.is_Sub and i.dim.local for i in tree):
+                    # At least an outer Iteration is over a local SubDimension,
+                    # which suggests the computational cost of this Iteration
+                    # nest will be negligible w.r.t. the "core" Iteration nest
+                    # (making use of non-local (Sub)Dimensions only)
+                    continue
+            if not IsPerfectIteration().visit(root):
+                # Don't know how to block non-perfect nests
+                continue
+
+            # Apply hierarchical loop blocking to `tree`
+            level_0 = []  # Outermost level of blocking
+            level_i = [[] for i in range(1, self.nlevels)]  # Inner levels of blocking
+            intra = []  # Within the smallest block
+            for i in iterations:
+                template = "%s%d_blk%s" % (i.dim.name, self.nblocked, '%d')
+                properties = (PARALLEL,) + ((AFFINE,) if i.is_Affine else ())
+
+                # Build Iteration across `level_0` blocks
+                d = BlockDimension(i.dim, name=template % 0)
+                level_0.append(Iteration([], d, d.symbolic_max, properties=properties))
+
+                # Build Iteration across all `level_i` blocks, `i` in (1, self.nlevels]
+                for n, li in enumerate(level_i, 1):
+                    di = BlockDimension(d, name=template % n)
+                    li.append(Iteration([], di, limits=(d, d+d.step-1, di.step),
+                                        properties=properties))
+                    d = di
+
+                # Build Iteration within the smallest block
+                intra.append(i._rebuild([], limits=(d, d+d.step-1, 1), offsets=(0, 0)))
+            level_i = flatten(level_i)
+
+            # Track all constructed BlockDimensions
+            block_dims.extend(i.dim for i in level_0 + level_i)
+
+            # Construct the blocked tree
+            blocked = compose_nodes(level_0 + level_i + intra + [iterations[-1].nodes])
+            blocked = unfold_blocked_tree(blocked)
+
+            # Promote to a separate Callable
+            dynamic_parameters = flatten((l0.dim, l0.step) for l0 in level_0)
+            dynamic_parameters.extend([li.step for li in level_i])
+            efunc = make_efunc("bf%d" % self.nblocked, blocked, dynamic_parameters)
+            efuncs.append(efunc)
+
+            # Compute the iteration ranges
+            ranges = []
+            for i, l0 in zip(iterations, level_0):
+                maxb = i.symbolic_max - (i.symbolic_size % l0.step)
+                ranges.append(((i.symbolic_min, maxb, l0.step),
+                               (maxb + 1, i.symbolic_max, i.symbolic_max - maxb)))
+
+            # Build Calls to the `efunc`
+            body = []
+            for p in product(*ranges):
+                dynamic_args_mapper = {}
+                for l0, (m, M, b) in zip(level_0, p):
+                    dynamic_args_mapper[l0.dim] = (m, M)
+                    dynamic_args_mapper[l0.step] = (b,)
+                    for li in level_i:
+                        if li.dim.root is l0.dim.root:
+                            value = li.step if b is l0.step else b
+                            dynamic_args_mapper[li.step] = (value,)
+                call = efunc.make_call(dynamic_args_mapper)
+                body.append(List(body=call))
+
+            mapper[root] = List(body=body)
+
+            # Next blockable nest, use different (unique) variable/function names
+            self.nblocked += 1
+
+        iet = Transformer(mapper).visit(iet)
+
+        # Force-unfold if some folded Iterations haven't been blocked in the end
+        iet = unfold_blocked_tree(iet)
+
+        return iet, {'dimensions': block_dims,
+                     'efuncs': efuncs,
+                     'args': [i.step for i in block_dims]}
+
+
+def fold_blockable_tree(iet, blockinner=True):
     """
     Create IterationFolds from sequences of nested Iterations.
     """
     mapper = {}
-    for k, v in FindAdjacent(Iteration).visit(node).items():
-        for i in v:
+    for k, sequence in FindAdjacent(Iteration).visit(iet).items():
+        # Group based on Dimension
+        groups = []
+        for subsequence in sequence:
+            for _, v in groupby(subsequence, lambda i: i.dim):
+                i = list(v)
+                if len(i) >= 2:
+                    groups.append(i)
+        for i in groups:
             # Pre-condition: they all must be perfect iterations
-            assert len(i) > 1
             if any(not IsPerfectIteration().visit(j) for j in i):
                 continue
             # Only retain consecutive trees having same depth
@@ -42,7 +166,7 @@ def fold_blockable_tree(node, blockinner=True):
             if blockinner is False:
                 pairwise_folds = pairwise_folds[:-1]
             # Perhaps there's nothing to fold
-            if len(pairwise_folds) == 1:
+            if len(pairwise_folds) == 0:
                 continue
             # TODO: we do not currently support blocking if any of the foldable
             # iterations writes to user data (need min/max loop bounds?)
@@ -51,20 +175,20 @@ def fold_blockable_tree(node, blockinner=True):
                 continue
             # Perform folding
             for j in pairwise_folds:
-                root, remainder = j[0], j[1:]
-                folds = [(tuple(y-x for x, y in zip(i.offsets, root.offsets)), i.nodes)
+                r, remainder = j[0], j[1:]
+                folds = [(tuple(y-x for x, y in zip(i.offsets, r.offsets)), i.nodes)
                          for i in remainder]
-                mapper[root] = IterationFold(folds=folds, **root.args)
+                mapper[r] = IterationFold(folds=folds, **r.args)
                 for k in remainder:
                     mapper[k] = None
 
     # Insert the IterationFolds in the Iteration/Expression tree
-    processed = Transformer(mapper, nested=True).visit(node)
+    iet = Transformer(mapper, nested=True).visit(iet)
 
-    return processed
+    return iet
 
 
-def unfold_blocked_tree(node):
+def unfold_blocked_tree(iet):
     """
     Unfold nested IterationFolds.
 
@@ -88,7 +212,7 @@ def unfold_blocked_tree(node):
     """
     # Search the unfolding candidates
     candidates = []
-    for tree in retrieve_iteration_tree(node):
+    for tree in retrieve_iteration_tree(iet):
         handle = tuple(i for i in tree if i.is_IterationFold)
         if handle:
             # Sanity check
@@ -103,9 +227,9 @@ def unfold_blocked_tree(node):
         mapper[tree[0]] = List(body=trees)
 
     # Insert the unfolded Iterations in the Iteration/Expression tree
-    processed = Transformer(mapper).visit(node)
+    iet = Transformer(mapper).visit(iet)
 
-    return processed
+    return iet
 
 
 def is_foldable(nodes):
@@ -116,9 +240,11 @@ def is_foldable(nodes):
     nodes = as_tuple(nodes)
     if len(nodes) <= 1 or any(not i.is_Iteration for i in nodes):
         return False
-    main = nodes[0]
-    return all(i.dim == main.dim and i.limits == main.limits and i.index == main.index
-               and i.properties == main.properties for i in nodes)
+    if not all({PARALLEL, AFFINE}.issubset(set(i.properties)) for i in nodes):
+        return False
+    return (all_equal(i.dim for i in nodes) and
+            all_equal(i.limits for i in nodes) and
+            all_equal(i.index for i in nodes))
 
 
 def optimize_unfolded_tree(unfolded, root):
@@ -158,42 +284,47 @@ def optimize_unfolded_tree(unfolded, root):
     for i, tree in enumerate(unfolded):
         assert len(tree) == len(root)
 
-        # We can optimize the folded trees only if they compute temporary
-        # arrays, but not if they compute input data
-        exprs = FindNodes(Expression).visit(tree[-1])
+        # We can optimize the folded trees only iff:
+        # test0 := they compute temporary arrays, but not if they compute input data
+        # test1 := the outer Iterations have actually been blocked
+        exprs = FindNodes(Expression).visit(tree)
         writes = [j.write for j in exprs if j.is_tensor]
-        if not all(j.is_Array for j in writes):
+        test0 = not all(j.is_Array for j in writes)
+        test1 = any(not isinstance(j.limits[0], BlockDimension) for j in root)
+        if test0 or test1:
             processed.append(compose_nodes(tree))
             root = compose_nodes(root)
             continue
 
+        # Shrink the iteration space
         modified_tree = []
         modified_root = []
+        modified_dims = {}
         mapper = {}
+        for t, r in zip(tree, root):
+            udim0 = IncrDimension(t.dim, t.symbolic_min, 1, "%ss%d" % (t.index, i))
+            modified_tree.append(t._rebuild(limits=(0, t.limits[1] - t.limits[0], t.step),
+                                            uindices=t.uindices + (udim0,)))
 
-        # "Shrink" the iteration space
-        for t1, t2 in zip(tree, root):
-            t1_udim = IncrDimension(t1.dim, t1.symbolic_min, 1, "%ss%d" % (t1.index, i))
-            limits = (0, t1.limits[1] - t1.limits[0], t1.step)
-            modified_tree.append(t1._rebuild(limits=limits,
-                                             uindices=t1.uindices + (t1_udim,)))
+            mapper[t.dim] = udim0
 
-            t2_udim = IncrDimension(t1.dim, 0, 1, "%ss%d" % (t1.index, i))
-            modified_root.append(t2._rebuild(uindices=t2.uindices + (t2_udim,)))
+            udim1 = IncrDimension(t.dim, 0, 1, "%ss%d" % (t.index, i))
+            modified_root.append(r._rebuild(uindices=r.uindices + (udim1,)))
 
-            mapper[t1.dim] = t1_udim
+            d = r.limits[0]
+            assert isinstance(d, BlockDimension)
+            modified_dims[d.root] = d
 
         # Temporary arrays can now be moved onto the stack
-        dimensions = tuple(j.limits[0] for j in modified_root)
-        for j in writes:
-            if j.is_Array:
-                j_dimensions = dimensions + j.dimensions[len(modified_root):]
-                j_shape = tuple(k.symbolic_size for k in j_dimensions)
-                j.update(shape=j_shape, dimensions=j_dimensions, scope='stack')
+        for w in writes:
+            dims = tuple(modified_dims.get(d, d) for d in w.dimensions)
+            shape = tuple(d.symbolic_size for d in dims)
+            w.update(shape=shape, dimensions=dims, scope='stack')
 
         # Substitute iteration variables within the folded trees
         modified_tree = compose_nodes(modified_tree)
-        replaced = xreplace_indices([j.expr for j in exprs], mapper, only_rhs=True)
+        replaced = xreplace_indices([j.expr for j in exprs], mapper,
+                                    lambda i: i.function not in writes, True)
         subs = [j._rebuild(expr=k) for j, k in zip(exprs, replaced)]
         processed.append(Transformer(dict(zip(exprs, subs))).visit(modified_tree))
 
@@ -274,7 +405,7 @@ class BlockDimension(IncrDimension):
 
     @property
     def _arg_names(self):
-        return (self.step.name,) + self.parent._arg_names
+        return (self.step.name,)
 
     def _arg_defaults(self, **kwargs):
         # TODO: need a heuristic to pick a default block size
@@ -282,22 +413,36 @@ class BlockDimension(IncrDimension):
 
     def _arg_values(self, args, interval, grid, **kwargs):
         if self.step.name in kwargs:
-            value = kwargs.pop(self.step.name)
-            if value <= args[self.root.max_name] - args[self.root.min_name]:
-                return {self.step.name: value}
-            elif value < 0:
-                raise ValueError("Illegale block size `%s=%d` (it should be > 0)"
-                                 % (self.step.name, value))
-            else:
-                # Avoid OOB
-                warning("The specified block size `%s=%d` is bigger than the "
-                        "iteration range; shrinking it to `%s=1`."
-                        % (self.step.name, value, self.step.name))
-                return {self.step.name: 1}
+            return {self.step.name: kwargs.pop(self.step.name)}
+        elif isinstance(self.parent, BlockDimension):
+            # `self` is a BlockDimension within an outer BlockDimension, but
+            # no value supplied -> the sub-block will span the entire block
+            return {self.step.name: args[self.parent.step.name]}
         else:
             value = self._arg_defaults()[self.step.name]
-            if value <= args[self.root.max_name] - args[self.root.min_name]:
+            if value <= args[self.root.max_name] - args[self.root.min_name] + 1:
                 return {self.step.name: value}
             else:
-                # Avoid OOB
+                # Avoid OOB (will end up here only in case of tiny iteration spaces)
                 return {self.step.name: 1}
+
+    def _arg_check(self, args, interval):
+        """Check the block size won't cause OOB accesses."""
+        value = args[self.step.name]
+        if isinstance(self.parent, BlockDimension):
+            # sub-BlockDimensions must be perfect divisors of their parent
+            parent_value = args[self.parent.step.name]
+            if parent_value % value > 0:
+                raise InvalidArgument("Illegal block size `%s=%d`: sub-block sizes "
+                                      "must divide the parent block size evenly (`%s=%d`)"
+                                      % (self.step.name, value,
+                                         self.parent.step.name, parent_value))
+        else:
+            if value < 0:
+                raise InvalidArgument("Illegal block size `%s=%d`: it should be > 0"
+                                      % (self.step.name, value))
+            if value > args[self.root.max_name] - args[self.root.min_name] + 1:
+                # Avoid OOB
+                raise InvalidArgument("Illegal block size `%s=%d`: it's greater than the "
+                                      "iteration range and it will cause an OOB access"
+                                      % (self.step.name, value))

@@ -42,7 +42,7 @@ def st_schedule(clusters):
         index = 0
         root = stree
         for it0, it1 in zip(c.itintervals, pointers):
-            if it0 != it1 or it0.dim in c.atomics:
+            if it0 != it1:
                 break
             root = mapper[it0]
             index += 1
@@ -51,9 +51,9 @@ def st_schedule(clusters):
 
         # The reused sub-trees might acquire some new sub-iterators
         for i in pointers[:index]:
-            mapper[i].ispace = IterationSpace.merge(mapper[i].ispace,
+            mapper[i].ispace = IterationSpace.union(mapper[i].ispace,
                                                     c.ispace.project([i.dim]))
-        # Later sub-trees, instead, will not be used anymore
+        # Nested sub-trees, instead, will not be used anymore
         for i in pointers[index:]:
             mapper.pop(i)
 
@@ -63,14 +63,19 @@ def st_schedule(clusters):
             mapper[i] = root
 
         # Add in Expressions
-        NodeExprs(c.exprs, c.ispace, c.dspace, c.shape, c.ops, c.traffic, root)
+        NodeExprs(c.exprs, c.ispace, c.dspace, c.ops, c.traffic, root)
 
         # Add in Conditionals
-        for k, v in mapper.items():
+        drop_guarded = None
+        for k, v in list(mapper.items()):
+            if drop_guarded:
+                mapper.pop(k)
             if k.dim in c.guards:
                 node = NodeConditional(c.guards[k.dim])
                 v.last.parent = node
                 node.parent = v
+                # Drop nested guarded sub-trees
+                drop_guarded = True
 
     return stree
 
@@ -90,21 +95,26 @@ def st_make_halo(stree):
             if configuration['mpi']:
                 raise RuntimeError(str(e))
 
-    # Insert the HaloScheme at a suitable level in the ScheduleTree
+    # Split a HaloScheme based on where it should be inserted
+    # For example, it's possible that, for a given HaloScheme, a Function's
+    # halo needs to be exchanged at a certain `stree` depth, while another
+    # Function's halo needs to be exchanged before some other nodes
     mapper = {}
     for k, hs in halo_schemes.items():
         for f, v in hs.fmapper.items():
             spot = k
             ancestors = [n for n in k.ancestors if n.is_Iteration]
             for n in ancestors:
-                test0 = any(n.dim is i.dim for i in v.halos)
-                test1 = n.dim not in [i.root for i in v.loc_indices]
-                if test0 or test1:
+                # Place the halo exchange right before the first
+                # distributed Dimension which requires it
+                if any(n.dim is i.dim for i in v.halos):
                     spot = n
                     break
-            mapper.setdefault(spot, []).append((f, v))
-    for spot, entries in mapper.items():
-        insert(NodeHalo(HaloScheme(fmapper=dict(entries))), spot.parent, [spot])
+            mapper.setdefault(spot, []).append(hs.project(f))
+
+    # Now fuse the HaloSchemes at the same `stree` depth and perform the insertion
+    for spot, halo_schemes in mapper.items():
+        insert(NodeHalo(HaloScheme.union(halo_schemes)), spot.parent, [spot])
 
     return stree
 

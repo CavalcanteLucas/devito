@@ -1,260 +1,400 @@
+from collections import Counter
+from itertools import groupby
+
 import sympy
 
-from devito.ir.support import (Scope, DataSpace, IterationSpace, detect_flow_directions,
-                               force_directions)
-from devito.ir.clusters.cluster import PartialCluster, ClusterGroup
-from devito.symbolics import CondEq, xreplace_indices
-from devito.tools import flatten
-from devito.types import Scalar
+from devito.ir.support import Any, Backward, Forward, IterationSpace, Scope
+from devito.ir.clusters.cluster import Cluster, ClusterGroup
+from devito.symbolics import CondEq
+from devito.tools import DAG, as_tuple, flatten
 
-__all__ = ['clusterize', 'groupby']
+__all__ = ['clusterize', 'optimize']
 
 
-def groupby(clusters):
+def clusterize(exprs):
     """
-    Group PartialClusters together to create "fatter" PartialClusters
-    (i.e., containing more expressions).
+    Turn a sequence of LoweredEqs into a sequence of Clusters.
+    """
+    # Initialization
+    clusters = [Cluster(e, e.ispace, e.dspace) for e in exprs]
+
+    # Compute a topological ordering that honours flow- and anti-dependences.
+    # This is necessary prior to enforcing the iteration direction (step below)
+    clusters = Toposort().process(clusters)
+
+    # Enforce iteration directions. This turns anti- into flow-dependences by
+    # reversing the iteration direction (Backward instead of Forward). A new
+    # topological sorting is then computed to expose more fusion opportunities,
+    # which will be exploited within `optimize`
+    clusters = Enforce().process(clusters)
+    clusters = Toposort().process(clusters)
+
+    # Apply optimizations
+    clusters = optimize(clusters)
+
+    # Introduce conditional Clusters
+    clusters = guard(clusters)
+
+    return ClusterGroup(clusters)
+
+
+class Queue(object):
+
+    """
+    A special queue to process objects in nested IterationSpaces based on
+    a divide-and-conquer algorithm.
 
     Notes
     -----
-    This function relies on advanced data dependency analysis tools based upon
-    classic Lamport theory.
+    Subclasses must override :meth:`callback`, which gets executed upon
+    the conquer phase of the algorithm.
     """
-    clusters = clusters.unfreeze()
 
-    processed = ClusterGroup()
-    for c in clusters:
-        fused = False
-        for candidate in reversed(list(processed)):
-            # Guarded clusters cannot be grouped together
-            if c.guards:
+    def callback(self, *args):
+        raise NotImplementedError
+
+    def process(self, elements):
+        return self._process(elements, 1)
+
+    def _process(self, elements, level, prefix=None):
+        prefix = prefix or []
+
+        # Divide part
+        processed = []
+        for pfx, g in groupby(elements, key=lambda i: i.itintervals[:level]):
+            if level > len(pfx):
+                # Base case
+                processed.extend(list(g))
+            else:
+                # Recursion
+                processed.extend(self._process(list(g), level + 1, pfx))
+
+        # Conquer part (execute callback)
+        processed = self.callback(processed, prefix)
+
+        return processed
+
+
+class Toposort(Queue):
+
+    """
+    Topologically sort a sequence of Clusters.
+
+    A heuristic, which attempts to maximize Cluster fusion by bringing together
+    Clusters with compatible IterationSpace, is used.
+    """
+
+    def callback(self, cgroups, prefix):
+        cgroups = self._toposort(cgroups, prefix)
+        cgroups = self._aggregate(cgroups, prefix)
+        return cgroups
+
+    def process(self, clusters):
+        cgroups = [ClusterGroup(c, c.itintervals) for c in clusters]
+        cgroups = self._process(cgroups, 1)
+        clusters = ClusterGroup.concatenate(*cgroups)
+        return clusters
+
+    def _toposort(self, cgroups, prefix):
+        # Are there any ClusterGroups that could potentially be fused? If not,
+        # don't waste time computing a new topological ordering
+        counter = Counter(cg.itintervals for cg in cgroups)
+        if not any(v > 1 for it, v in counter.most_common()):
+            return cgroups
+
+        # Similarly, if all ClusterGroups have the same exact prefix, no need
+        # to topologically resort
+        if len(counter.most_common()) == 1:
+            return cgroups
+
+        dag = self._build_dag(cgroups, prefix)
+
+        def choose_element(queue, scheduled):
+            # Heuristic 1: do not move Clusters computing Arrays (temporaries),
+            # to preserve cross-loop blocking opportunities
+            # Heuristic 2: prefer a node having same IterationSpace as that of
+            # the last scheduled node to maximize Cluster fusion
+            if not scheduled:
+                return queue.pop()
+            last = scheduled[-1]
+            for i in list(queue):
+                if any(f.is_Array for f in i.scope.writes):
+                    continue
+                elif i.itintervals == last.itintervals:
+                    queue.remove(i)
+                    return i
+            return queue.popleft()
+
+        processed = dag.topological_sort(choose_element)
+
+        return processed
+
+    def _aggregate(self, cgroups, prefix):
+        """
+        Concatenate a sequence of ClusterGroups into a new ClusterGroup.
+        """
+        return [ClusterGroup(cgroups, prefix)]
+
+    def _build_dag(self, cgroups, prefix):
+        """
+        A DAG captures data dependences between ClusterGroups up to the iteration
+        space depth dictated by ``prefix``.
+
+        Examples
+        --------
+        Consider two ClusterGroups `c0` and `c1`, and ``prefix=[i]``.
+
+        1) cg0 := b[i, j] = ...
+           cg1 := ... = ... b[i, j] ...
+           Non-carried flow-dependence, so `cg1` must go after `cg0`.
+
+        2) cg0 := b[i, j] = ...
+           cg1 := ... = ... b[i, j+1] ...
+           Carried anti-dependence in `j`, so `cg1` must go after `cg0`.
+
+        3) cg0 := b[i, j] = ...
+           cg1 := ... = ... b[i-1, j+1] ...
+           Carried flow-dependence in `i`, so `cg1` can safely go before or after
+           `cg0`. Note: the `j+1` in `cg1` has no impact -- the dependence is in `i`.
+
+        4) cg0 := b[i, j] = ...
+           cg1 := ... = ... b[i, j-1] ...
+           Carried flow-dependence in `j`, so `cg1` must go after `cg0`. Unlike
+           case 3), the flow-dependence is along a Dimension that doesn't appear in
+           `prefix`, so `cg0` and `cg1 are sequentialized.
+        """
+        prefix = {i.dim for i in as_tuple(prefix)}
+
+        dag = DAG(nodes=cgroups)
+        for n, cg0 in enumerate(cgroups):
+            for cg1 in cgroups[n+1:]:
+                scope = Scope(exprs=cg0.exprs + cg1.exprs)
+
+                # Handle anti-dependences
+                deps = scope.d_anti - (cg0.scope.d_anti + cg1.scope.d_anti)
+                if any(i.cause & prefix for i in deps):
+                    # Anti-dependences break the execution flow
+                    # i) ClusterGroups between `cg0` and `cg1` must precede `cg1`
+                    for cg2 in cgroups[n:cgroups.index(cg1)]:
+                        dag.add_edge(cg2, cg1)
+                    # ii) ClusterGroups after `cg1` cannot precede `cg1`
+                    for cg2 in cgroups[cgroups.index(cg1)+1:]:
+                        dag.add_edge(cg1, cg2)
+                    break
+                elif deps:
+                    dag.add_edge(cg0, cg1)
+
+                # Flow-dependences along one of the `prefix` Dimensions can
+                # be ignored; all others require sequentialization
+                deps = scope.d_flow - (cg0.scope.d_flow + cg1.scope.d_flow)
+                if any(not (i.cause and i.cause & prefix) for i in deps):
+                    dag.add_edge(cg0, cg1)
+                    continue
+
+                # Handle increment-after-write dependences
+                deps = scope.d_output - (cg0.scope.d_output + cg1.scope.d_output)
+                if any(i.is_iaw for i in deps):
+                    dag.add_edge(cg0, cg1)
+                    continue
+
+        return dag
+
+
+class Enforce(Queue):
+
+    """
+    Enforce the iteration direction in a sequence of Clusters based on
+    data dependence analysis. The iteration direction will be such that
+    the information naturally flows from one iteration to another.
+
+    This will construct a new sequence of Clusters in which only `Forward`
+    or `Backward` IterationDirections will appear (i.e., no `Any`).
+
+    Examples
+    --------
+    In `u[t+1, x] = u[t, x]`, the iteration Dimension `t` gets assigned the
+    `Forward` iteration direction, whereas in `u[t-1, x] = u[t, x]` it gets
+    assigned `Backward`. The idea is that "to evaluate the LHS at a given
+    `t`, we need up-to-date information on the RHS".
+    """
+
+    def callback(self, clusters, prefix, backlog=None, known_break=None):
+        if not prefix:
+            return clusters
+
+        known_break = known_break or set()
+        backlog = backlog or []
+
+        # Take the innermost Dimension -- no other Clusters other than those in
+        # `clusters` are supposed to share it
+        candidates = prefix[-1].dim._defines
+
+        scope = Scope(exprs=flatten(c.exprs for c in clusters))
+
+        # The nastiest case:
+        # eq0 := u[t+1, x] = ... u[t, x]
+        # eq1 := v[t+1, x] = ... v[t, x] ... u[t, x] ... u[t+1, x] ... u[t+2, x]
+        # Here, `eq0` marches forward along `t`, while `eq1` has both a flow and an
+        # anti dependence with `eq0`, which ultimately will require `eq1` to go in
+        # a separate t-loop
+        require_break = (scope.d_flow.cause & scope.d_anti.cause) & candidates
+        if require_break and len(clusters) > 1:
+            backlog = [clusters[-1]] + backlog
+            # Try with increasingly smaller Cluster groups until the ambiguity is solved
+            return self.callback(clusters[:-1], prefix, backlog, require_break)
+
+        # If the flow- or anti-dependences are not coupled, one or more Clusters
+        # might be scheduled separately, to increase parallelism (this is basically
+        # what low-level compilers call "loop fission")
+        for n, _ in enumerate(clusters):
+            d_cross = scope.d_from_access(scope.a_query(n, 'R')).cross()
+            if any(d.is_storage_volatile(candidates) for d in d_cross):
+                break
+            elif d_cross.cause & candidates:
+                if n > 0:
+                    return self.callback(clusters[:n], prefix, clusters[n:] + backlog,
+                                         (d_cross.cause & candidates) | known_break)
                 break
 
-            # Collect all relevant data dependences
-            scope = Scope(exprs=candidate.exprs + c.exprs)
+        # Compute iteration direction
+        direction = {d: Backward for d in candidates if d.root in scope.d_anti.cause}
+        direction.update({d: Forward for d in candidates if d.root in scope.d_flow.cause})
+        direction.update({d: Forward for d in candidates if d not in direction})
 
-            # Collect anti-dependences preventing grouping
-            anti = scope.d_anti.carried() - scope.d_anti.increment
-            funcs = set(anti.functions)
+        # Enforce iteration direction on each Cluster
+        processed = []
+        for c in clusters:
+            ispace = IterationSpace(c.ispace.intervals, c.ispace.sub_iterators,
+                                    {**c.ispace.directions, **direction})
+            processed.append(Cluster(c.exprs, ispace, c.dspace))
 
-            # Collect flow-dependences breaking the search
-            flow = scope.d_flow - (scope.d_flow.inplace() + scope.d_flow.increment)
+        if not backlog:
+            return processed
 
-            # Can we group `c` with `candidate`?
-            test0 = not candidate.guards  # No intervening guards
-            test1 = candidate.ispace.is_compatible(c.ispace)  # Compatible ispaces
-            test2 = all(is_local(i, candidate, c, clusters) for i in funcs)  # No antideps
-            if test0 and test1 and test2:
-                # Yes, `c` can be grouped with `candidate`. All anti-dependences
-                # (if any) can be eliminated through "index bumping and array
-                # contraction", which turns Array temporaries into Scalar temporaries
+        # Handle the backlog -- the Clusters characterized by flow- and anti-dependences
+        # along one or more Dimensions
+        direction = {d: Any for d in known_break}
+        for i, c in enumerate(list(backlog)):
+            ispace = IterationSpace(c.ispace.intervals.lift(known_break),
+                                    c.ispace.sub_iterators,
+                                    {**c.ispace.directions, **direction})
+            backlog[i] = Cluster(c.exprs, ispace, c.dspace)
 
-                # Optimization: we also bump-and-contract the Arrays inducing
-                # non-carried dependences, to minimize the working set
-                funcs.update({i.function for i in scope.d_flow.independent()
-                              if is_local(i.function, candidate, c, clusters)})
+        return processed + self.callback(backlog, prefix)
 
-                bump_and_contract(funcs, candidate, c)
-                candidate.squash(c)
-                fused = True
-                break
-            elif anti:
-                # Data dependences prevent fusion with earlier Clusters, so
-                # must break up the search
-                c.atomics.update(anti.cause)
-                break
-            elif flow.cause & candidate.atomics:
-                # We cannot even attempt fusing with earlier Clusters, as
-                # otherwise the carried flow dependences wouldn't be honored
-                break
-            elif set(candidate.guards) & set(c.dimensions):
-                # Like above, we can't attempt fusion with earlier Clusters.
-                # Time time because there are intervening conditionals along
-                # one or more of the shared iteration dimensions
-                break
-        # Fallback
-        if not fused:
-            processed.append(c)
+
+def optimize(clusters):
+    """
+    Optimize a topologically-ordered sequence of Clusters by applying the
+    following transformations:
+
+        * Fusion
+        * Lifting
+
+    Notes
+    -----
+    This function relies on advanced data dependency analysis tools based upon classic
+    Lamport theory.
+    """
+    # Lifting
+    clusters = Lift().process(clusters)
+
+    # Fusion
+    clusters = fuse(clusters)
+
+    return clusters
+
+
+class Lift(Queue):
+
+    """
+    Remove invariant Dimensions from Clusters to avoid redundant computation.
+
+    Notes
+    -----
+    This is analogous to the compiler transformation known as
+    "loop-invariant code motion".
+    """
+
+    def callback(self, clusters, prefix):
+        if not prefix:
+            # No iteration space to be lifted from
+            return clusters
+
+        hope_invariant = {i.dim for i in prefix}
+        candidates = [c for c in clusters if
+                      any(e.is_Tensor for e in c.exprs) and  # Not just scalar exprs
+                      not any(e.is_Increment for e in c.exprs) and  # No reductions
+                      not c.used_dimensions & hope_invariant]  # Not an invariant ispace
+        if not candidates:
+            return clusters
+
+        # Now check data dependences
+        lifted = []
+        processed = []
+        for c in clusters:
+            impacted = set(clusters) - {c}
+            if c in candidates and\
+                    not any(set(c.functions) & set(i.scope.writes) for i in impacted):
+                # Perform lifting, which requires contracting the iteration space
+                key = lambda d: d not in hope_invariant
+                ispace = c.ispace.project(key)
+                dspace = c.dspace.project(key)
+                lifted.append(Cluster(c.exprs, ispace, dspace, guards=c.guards))
+            else:
+                processed.append(c)
+
+        return lifted + processed
+
+
+def fuse(clusters):
+    """
+    Fuse sub-sequences of Clusters with compatible IterationSpace.
+    """
+    processed = []
+    for k, g in groupby(clusters, key=lambda c: set(c.itintervals)):
+        maybe_fusible = list(g)
+
+        if len(maybe_fusible) == 1 or any(c.guards for c in maybe_fusible):
+            processed.extend(maybe_fusible)
+        else:
+            try:
+                # Perform fusion
+                fused = Cluster.from_clusters(*maybe_fusible)
+                processed.append(fused)
+            except ValueError:
+                # We end up here if, for example, some Clusters have same
+                # iteration Dimensions but different (partial) orderings
+                processed.extend(maybe_fusible)
 
     return processed
 
 
 def guard(clusters):
     """
-    Return a ClusterGroup containing a new PartialCluster for each conditional
-    expression encountered in ``clusters``.
+    Split Clusters containing conditional expressions into separate Clusters.
     """
-    processed = ClusterGroup()
+    processed = []
     for c in clusters:
         free = []
         for e in c.exprs:
             if e.conditionals:
                 # Expressions that need no guarding are kept in a separate Cluster
                 if free:
-                    processed.append(PartialCluster(free, c.ispace, c.dspace, c.atomics))
+                    processed.append(Cluster(free, c.ispace, c.dspace))
                     free = []
-                # Create a guarded PartialCluster
+
+                # Create a guarded Cluster
                 guards = {}
                 for d in e.conditionals:
                     condition = guards.setdefault(d.parent, [])
                     condition.append(d.condition or CondEq(d.parent % d.factor, 0))
                 guards = {k: sympy.And(*v, evaluate=False) for k, v in guards.items()}
-                processed.append(PartialCluster(e, c.ispace, c.dspace, c.atomics, guards))
+                processed.append(Cluster(e, c.ispace, c.dspace, guards))
             else:
                 free.append(e)
         # Leftover
         if free:
-            processed.append(PartialCluster(free, c.ispace, c.dspace, c.atomics))
+            processed.append(Cluster(free, c.ispace, c.dspace))
 
-    return ClusterGroup(processed)
-
-
-def is_local(array, source, sink, context):
-    """
-    Return True if ``array`` satisfies the following conditions: ::
-
-        * it's a temporary; that is, of type Array;
-        * it's written once, within the ``source`` PartialCluster, and
-          its value only depends on global data;
-        * it's read in the ``sink`` PartialCluster only; in particular,
-          it doesn't appear in any other PartialClusters out of those
-          provided in ``context``.
-
-    If any of these conditions do not hold, return False.
-    """
-    if not array.is_Array:
-        return False
-
-    # Written in source
-    written_once = False
-    for i in source.trace.values():
-        if array == i.function:
-            if written_once is True:
-                # Written more than once, break
-                written_once = False
-                break
-            reads = [j.function for j in i.reads]
-            if any(j.is_DiscreteFunction or j.is_Scalar for j in reads):
-                # Can't guarantee its value only depends on local data
-                written_once = False
-                break
-            written_once = True
-    if written_once is False:
-        return False
-
-    # Never read outside of sink
-    context = [i for i in context if i not in [source, sink]]
-    if array in flatten(i.unknown for i in context):
-        return False
-
-    return True
-
-
-def bump_and_contract(targets, source, sink):
-    """
-    Transform in-place the PartialClusters ``source`` and ``sink`` by turning
-    the Arrays in ``targets`` into Scalars. This is implemented through index
-    bumping and array contraction.
-
-    Parameters
-    ----------
-    targets : list of Array
-        The Arrays that will be contracted.
-    source : PartialCluster
-        The PartialCluster in which the Arrays are initialized.
-    sink : PartialCluster
-        The PartialCluster that consumes (i.e., reads) the Arrays.
-
-    Examples
-    --------
-    1) Index bumping
-    Given: ::
-
-        r[x,y,z] = b[x,y,z]*2
-
-    Produce: ::
-
-        r[x,y,z] = b[x,y,z]*2
-        r[x,y,z+1] = b[x,y,z+1]*2
-
-    2) Array contraction
-    Given: ::
-
-        r[x,y,z] = b[x,y,z]*2
-        r[x,y,z+1] = b[x,y,z+1]*2
-
-    Produce: ::
-
-        tmp0 = b[x,y,z]*2
-        tmp1 = b[x,y,z+1]*2
-
-    3) Full example (bump+contraction)
-    Given: ::
-
-        source: [r[x,y,z] = b[x,y,z]*2]
-        sink: [a = ... r[x,y,z] ... r[x,y,z+1] ...]
-        targets: r
-
-    Produce: ::
-
-        source: [tmp0 = b[x,y,z]*2, tmp1 = b[x,y,z+1]*2]
-        sink: [a = ... tmp0 ... tmp1 ...]
-    """
-    if not targets:
-        return
-    mapper = {}
-
-    # Source
-    processed = []
-    for e in source.exprs:
-        function = e.lhs.function
-        if any(function not in i for i in [targets, sink.tensors]):
-            processed.append(e.func(e.lhs, e.rhs.xreplace(mapper)))
-        else:
-            for i in sink.tensors[function]:
-                scalar = Scalar(name='s%s%d' % (i.function.name, len(mapper))).indexify()
-                mapper[i] = scalar
-
-                # Index bumping
-                assert len(function.indices) == len(e.lhs.indices) == len(i.indices)
-                shifting = {idx: idx + (o2 - o1) for idx, o1, o2 in
-                            zip(function.indices, e.lhs.indices, i.indices)}
-
-                # Array contraction
-                handle = e.func(scalar, e.rhs.xreplace(mapper))
-                handle = xreplace_indices(handle, shifting)
-                processed.append(handle)
-    source.exprs = processed
-
-    # Sink
-    processed = [e.func(e.lhs, e.rhs.xreplace(mapper)) for e in sink.exprs]
-    sink.exprs = processed
-
-
-def clusterize(exprs):
-    """Group a sequence of LoweredEqs into one or more Clusters."""
-    clusters = ClusterGroup()
-    flowmap = detect_flow_directions(exprs)
-    prev = None
-    for idx, e in enumerate(exprs):
-        if e.is_Tensor:
-            scalars = [i for i in exprs[prev:idx] if i.is_Scalar]
-            # Iteration space
-            ispace = IterationSpace.merge(e.ispace, *[i.ispace for i in scalars])
-            # Enforce iteration directions
-            fdirs, _ = force_directions(flowmap, lambda d: ispace.directions.get(d))
-            ispace = IterationSpace(ispace.intervals, ispace.sub_iterators, fdirs)
-            # Data space
-            dspace = DataSpace.merge(e.dspace, *[i.dspace for i in scalars])
-            # Prepare for next range
-            prev = idx
-
-            clusters.append(PartialCluster(scalars + [e], ispace, dspace))
-
-    # Group PartialClusters together where possible
-    clusters = groupby(clusters)
-
-    # Introduce conditional PartialClusters
-    clusters = guard(clusters)
-
-    return clusters.finalize()
+    return processed

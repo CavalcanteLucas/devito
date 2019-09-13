@@ -1,19 +1,22 @@
 import os
 
 import numpy as np
+from sympy import sin, Abs
 
 from examples.seismic.utils import scipy_smooth
-from devito import Grid, SubDomain, Function, Constant, warning
+from devito import (Grid, SubDomain, Function, Constant, mmax,
+                    SubDimension, Eq, Inc, Operator)
+from devito.tools import as_tuple
 
-__all__ = ['Model', 'ModelElastic', 'demo_model']
+__all__ = ['Model', 'ModelElastic', 'ModelViscoelastic', 'demo_model']
 
 
 def demo_model(preset, **kwargs):
     """
-    Utility function to create preset :class:`Model` objects for
+    Utility function to create preset `Model` objects for
     demonstration and testing purposes. The particular presets are ::
 
-    * `constant-isotropic` : Constant velocity (1.5km/sec) isotropic model
+    * `constant-isotropic` : Constant velocity (1.5 km/sec) isotropic model
     * `constant-tti` : Constant anisotropic model. Velocity is 1.5 km/sec and
                       Thomsen parameters are epsilon=.3, delta=.2, theta = .7rad
                       and phi=.35rad for 3D. 2d/3d is defined from the input shape
@@ -41,7 +44,7 @@ def demo_model(preset, **kwargs):
 
     if preset.lower() in ['constant-elastic']:
         # A constant single-layer model in a 2D or 3D domain
-        # with velocity 1.5km/s.
+        # with velocity 1.5 km/s.
         shape = kwargs.pop('shape', (101, 101))
         spacing = kwargs.pop('spacing', tuple([10. for _ in shape]))
         origin = kwargs.pop('origin', tuple([0. for _ in shape]))
@@ -55,9 +58,28 @@ def demo_model(preset, **kwargs):
                             shape=shape, dtype=dtype, spacing=spacing, nbpml=nbpml,
                             **kwargs)
 
+    if preset.lower() in ['constant-viscoelastic']:
+        # A constant single-layer model in a 2D or 3D domain
+        # with velocity 2.2 km/s.
+        shape = kwargs.pop('shape', (101, 101))
+        spacing = kwargs.pop('spacing', tuple([10. for _ in shape]))
+        origin = kwargs.pop('origin', tuple([0. for _ in shape]))
+        nbpml = kwargs.pop('nbpml', 10)
+        dtype = kwargs.pop('dtype', np.float32)
+        vp = kwargs.pop('vp', 2.2)
+        qp = kwargs.pop('qp', 100.)
+        vs = kwargs.pop('vs', 1.2)
+        qs = kwargs.pop('qs', 70.)
+        rho = 2.
+
+        return ModelViscoelastic(space_order=space_order, vp=vp, qp=qp, vs=vs,
+                                 qs=qs, rho=rho, origin=origin, shape=shape,
+                                 dtype=dtype, spacing=spacing, nbpml=nbpml,
+                                 **kwargs)
+
     if preset.lower() in ['constant-isotropic']:
         # A constant single-layer model in a 2D or 3D domain
-        # with velocity 1.5km/s.
+        # with velocity 1.5 km/s.
         shape = kwargs.pop('shape', (101, 101))
         spacing = kwargs.pop('spacing', tuple([10. for _ in shape]))
         origin = kwargs.pop('origin', tuple([0. for _ in shape]))
@@ -70,7 +92,7 @@ def demo_model(preset, **kwargs):
 
     elif preset.lower() in ['constant-tti']:
         # A constant single-layer model in a 2D or 3D domain
-        # with velocity 1.5km/s.
+        # with velocity 1.5 km/s.
         shape = kwargs.pop('shape', (101, 101))
         spacing = kwargs.pop('spacing', tuple([10. for _ in shape]))
         origin = kwargs.pop('origin', tuple([0. for _ in shape]))
@@ -138,6 +160,56 @@ def demo_model(preset, **kwargs):
         return ModelElastic(space_order=space_order, vp=v, vs=vs, rho=rho,
                             origin=origin, shape=shape,
                             dtype=dtype, spacing=spacing, nbpml=nbpml, **kwargs)
+
+    elif preset.lower() in ['layers-viscoelastic', 'twolayer-viscoelastic',
+                            '2layer-viscoelastic']:
+        # A two-layer model in a 2D or 3D domain with two different
+        # velocities split across the height dimension:
+        # By default, the top part of the domain has 1.6 km/s,
+        # and the bottom part of the domain has 2.2 km/s.
+        shape = kwargs.pop('shape', (101, 101))
+        spacing = kwargs.pop('spacing', tuple([10. for _ in shape]))
+        origin = kwargs.pop('origin', tuple([0. for _ in shape]))
+        dtype = kwargs.pop('dtype', np.float32)
+        nbpml = kwargs.pop('nbpml', 10)
+        ratio = kwargs.pop('ratio', 3)
+        vp_top = kwargs.pop('vp_top', 1.6)
+        qp_top = kwargs.pop('qp_top', 40.)
+        vs_top = kwargs.pop('vs_top', 0.4)
+        qs_top = kwargs.pop('qs_top', 30.)
+        rho_top = kwargs.pop('rho_top', 1.3)
+        vp_bottom = kwargs.pop('vp_bottom', 2.2)
+        qp_bottom = kwargs.pop('qp_bottom', 100.)
+        vs_bottom = kwargs.pop('vs_bottom', 1.2)
+        qs_bottom = kwargs.pop('qs_bottom', 70.)
+        rho_bottom = kwargs.pop('qs_bottom', 2.)
+
+        # Define a velocity profile in km/s
+        vp = np.empty(shape, dtype=dtype)
+        qp = np.empty(shape, dtype=dtype)
+        vs = np.empty(shape, dtype=dtype)
+        qs = np.empty(shape, dtype=dtype)
+        rho = np.empty(shape, dtype=dtype)
+        # Top and bottom P-wave velocity
+        vp[:] = vp_top
+        vp[..., int(shape[-1] / ratio):] = vp_bottom
+        # Top and bottom P-wave quality factor
+        qp[:] = qp_top
+        qp[..., int(shape[-1] / ratio):] = qp_bottom
+        # Top and bottom S-wave velocity
+        vs[:] = vs_top
+        vs[..., int(shape[-1] / ratio):] = vs_bottom
+        # Top and bottom S-wave quality factor
+        qs[:] = qs_top
+        qs[..., int(shape[-1] / ratio):] = qs_bottom
+        # Top and bottom density
+        rho[:] = rho_top
+        rho[..., int(shape[-1] / ratio):] = rho_bottom
+
+        return ModelViscoelastic(space_order=space_order, vp=vp, qp=qp,
+                                 vs=vs, qs=qs, rho=rho, origin=origin,
+                                 shape=shape, dtype=dtype, spacing=spacing,
+                                 nbpml=nbpml, **kwargs)
 
     elif preset.lower() in ['layers-tti', 'twolayer-tti', '2layer-tti']:
         # A two-layer model in a 2D or 3D domain with two different
@@ -227,6 +299,7 @@ def demo_model(preset, **kwargs):
         shape = (1601, 401)
         spacing = (7.5, 7.5)
         origin = (0., 0.)
+        nbpml = kwargs.pop('nbpml', 20)
 
         # Read 2D Marmousi model from opesc/data repo
         data_path = kwargs.get('data_path', None)
@@ -260,7 +333,7 @@ def demo_model(preset, **kwargs):
         # Cut the model to make it slightly cheaper
         v = v[301:-300, :]
         vs = .5 * v[:]
-        rho = v[:]/np.max(v[:])
+        rho = v[:]/mmax(v[:])
 
         return ModelElastic(space_order=space_order, vp=v, vs=vs, rho=rho,
                             origin=origin, shape=v.shape,
@@ -349,59 +422,76 @@ def demo_model(preset, **kwargs):
 
 
 def initialize_damp(damp, nbpml, spacing, mask=False):
-    """Initialise damping field with an absorbing PML layer.
+    """
+    Initialise damping field with an absorbing PML layer.
 
-    :param damp: The :class:`Function` for the damping field.
-    :param nbpml: Number of points in the damping layer.
-    :param spacing: Grid spacing coefficient.
-    :param mask: whether the dampening is a mask or layer.
+    Parameters
+    ----------
+    damp : Function
+        The damping field for absorbing boundary condition.
+    nbpml : int
+        Number of points in the damping layer.
+    spacing :
+        Grid spacing coefficient.
+    mask : bool, optional
+        whether the dampening is a mask or layer.
         mask => 1 inside the domain and decreases in the layer
         not mask => 0 inside the domain and increase in the layer
     """
+    dampcoeff = 1.5 * np.log(1.0 / 0.001) / (40)
 
-    phy_shape = damp.grid.subdomains['phydomain'].shape
-    data = np.ones(phy_shape) if mask else np.zeros(phy_shape)
+    eqs = [Eq(damp, 1.0)] if mask else []
+    for d in damp.dimensions:
+        # left
+        dim_l = SubDimension.left(name='abc_%s_l' % d.name, parent=d,
+                                  thickness=nbpml)
+        pos = Abs((nbpml - (dim_l - d.symbolic_min) + 1) / float(nbpml))
+        val = dampcoeff * (pos - sin(2*np.pi*pos)/(2*np.pi))
+        val = -val if mask else val
+        eqs += [Inc(damp.subs({d: dim_l}), val/d.spacing)]
+        # right
+        dim_r = SubDimension.right(name='abc_%s_r' % d.name, parent=d,
+                                   thickness=nbpml)
+        pos = Abs((nbpml - (d.symbolic_max - dim_r) + 1) / float(nbpml))
+        val = dampcoeff * (pos - sin(2*np.pi*pos)/(2*np.pi))
+        val = -val if mask else val
+        eqs += [Inc(damp.subs({d: dim_r}), val/d.spacing)]
 
-    pad_widths = [(nbpml, nbpml) for i in range(damp.ndim)]
-    data = np.pad(data, pad_widths, 'edge')
-
-    dampcoeff = 1.5 * np.log(1.0 / 0.001) / (40.)
-
-    assert all(damp._offset_domain[0] == i for i in damp._offset_domain)
-
-    for i in range(damp.ndim):
-        for j in range(nbpml):
-            # Dampening coefficient
-            pos = np.abs((nbpml - j + 1) / float(nbpml))
-            val = dampcoeff * (pos - np.sin(2*np.pi*pos)/(2*np.pi))
-            if mask:
-                val = -val
-            # : slices
-            all_ind = [slice(0, d) for d in data.shape]
-            # Left slice for dampening for dimension i
-            all_ind[i] = slice(j, j+1)
-            data[tuple(all_ind)] += val/spacing[i]
-            # right slice for dampening for dimension i
-            all_ind[i] = slice(data.shape[i]-j, data.shape[i]-j+1)
-            data[tuple(all_ind)] += val/spacing[i]
-
-    initialize_function(damp, data, 0)
+    # TODO: Figure out why yask doesn't like it with dse/dle
+    Operator(eqs, name='initdamp', dse='noop', dle='noop')()
 
 
-def initialize_function(function, data, nbpml, pad_mode='edge'):
-    """Initialize a :class:`Function` with the given ``data``. ``data``
+def initialize_function(function, data, nbpml):
+    """
+    Initialize a `Function` with the given ``data``. ``data``
     does *not* include the PML layers for the absorbing boundary conditions;
     these are added via padding by this function.
 
-    :param function: The :class:`Function` to be initialised with some data.
-    :param data: The data array used for initialisation.
-    :param nbpml: Number of PML layers for boundary damping.
-    :param pad_mode: A string or a suitable padding function as explained in
-                     :func:`numpy.pad`.
+    Parameters
+    ----------
+    function : Function
+        The initialised object.
+    data : ndarray
+        The data array used for initialisation.
+    nbpml : int
+        Number of PML layers for boundary damping.
     """
-    pad_widths = [(nbpml + i.left, nbpml + i.right) for i in function._size_halo]
-    data = np.pad(data, pad_widths, pad_mode)
-    function.data_with_halo[:] = data
+    slices = tuple([slice(nbpml, -nbpml) for _ in range(function.grid.dim)])
+    function.data[slices] = data
+    eqs = []
+
+    for d in function.dimensions:
+        dim_l = SubDimension.left(name='abc_%s_l' % d.name, parent=d,
+                                  thickness=nbpml)
+        to_copy = nbpml
+        eqs += [Eq(function.subs({d: dim_l}), function.subs({d: to_copy}))]
+        dim_r = SubDimension.right(name='abc_%s_r' % d.name, parent=d,
+                                   thickness=nbpml)
+        to_copy = d.symbolic_max - nbpml
+        eqs += [Eq(function.subs({d: dim_r}), function.subs({d: to_copy}))]
+
+    # TODO: Figure out why yask doesn't like it with dse/dle
+    Operator(eqs, name='padfunc', dse='noop', dle='noop')()
 
 
 class PhysicalDomain(SubDomain):
@@ -421,7 +511,7 @@ class GenericModel(object):
     General model class with common properties
     """
     def __init__(self, origin, spacing, shape, space_order, nbpml=20,
-                 dtype=np.float32, subdomains=()):
+                 dtype=np.float32, subdomains=(), damp_mask=False):
         self.shape = shape
         self.nbpml = int(nbpml)
         self.origin = tuple([dtype(o) for o in origin])
@@ -436,6 +526,10 @@ class GenericModel(object):
         extent = tuple(np.array(spacing) * (shape_pml - 1))
         self.grid = Grid(extent=extent, shape=shape_pml, origin=origin_pml, dtype=dtype,
                          subdomains=subdomains)
+
+        # Create dampening field as symbol `damp`
+        self.damp = Function(name="damp", grid=self.grid)
+        initialize_damp(self.damp, self.nbpml, self.spacing, mask=damp_mask)
 
     def physical_params(self, **kwargs):
         """
@@ -468,7 +562,7 @@ class GenericModel(object):
     @property
     def spacing_map(self):
         """
-        Map between spacing symbols and their values for each :class:`SpaceDimension`
+        Map between spacing symbols and their values for each `SpaceDimension`.
         """
         return self.grid.spacing_map
 
@@ -486,26 +580,53 @@ class GenericModel(object):
         """
         return tuple((d-1) * s for d, s in zip(self.shape, self.spacing))
 
+    def _gen_phys_param(self, field, name, space_order, default_value=0):
+        if field is None:
+            return default_value
+        if isinstance(field, np.ndarray):
+            function = Function(name=name, grid=self.grid, space_order=space_order)
+            initialize_function(function, field, self.nbpml)
+        else:
+            function = Constant(name=name, value=field)
+        return function
+
 
 class Model(GenericModel):
-    """The physical model used in seismic inversion processes.
+    """
+    The physical model used in seismic inversion processes.
 
-    :param origin: Origin of the model in m as a tuple in (x,y,z) order
-    :param spacing: Grid size in m as a Tuple in (x,y,z) order
-    :param shape: Number of grid points size in (x,y,z) order
-    :param space_order: Order of the spatial stencil discretisation
-    :param vp: Velocity in km/s
-    :param nbpml: The number of PML layers for boundary damping
-    :param epsilon: Thomsen epsilon parameter (0<epsilon<1)
-    :param delta: Thomsen delta parameter (0<delta<1), delta<epsilon
-    :param theta: Tilt angle in radian
-    :param phi: Asymuth angle in radian
+    Parameters
+    ----------
+    origin : tuple of floats
+        Origin of the model in m as a tuple in (x,y,z) order.
+    spacing : tuple of floats
+        Grid size in m as a Tuple in (x,y,z) order.
+    shape : tuple of int
+        Number of grid points size in (x,y,z) order.
+    space_order : int
+        Order of the spatial stencil discretisation.
+    vp : array_like or float
+        Velocity in km/s.
+    nbpml : int, optional
+        The number of PML layers for boundary damping.
+    dtype : np.float32 or np.float64
+        Defaults to 32.
+    epsilon : array_like or float, optional
+        Thomsen epsilon parameter (0<epsilon<1).
+    delta : array_like or float
+        Thomsen delta parameter (0<delta<1), delta<epsilon.
+    theta : array_like or float
+        Tilt angle in radian.
+    phi : array_like or float
+        Asymuth angle in radian.
 
-    The :class:`Model` provides two symbolic data objects for the
+    The `Model` provides two symbolic data objects for the
     creation of seismic wave propagation operators:
 
-    :param m: The square slowness of the wave
-    :param damp: The damping field for absorbing boundarycondition
+    m : array_like or float
+        The square slowness of the wave.
+    damp : Function
+        The damping field for absorbing boundary condition.
     """
     def __init__(self, origin, spacing, shape, space_order, vp, nbpml=20,
                  dtype=np.float32, epsilon=None, delta=None, theta=None, phi=None,
@@ -513,158 +634,208 @@ class Model(GenericModel):
         super(Model, self).__init__(origin, spacing, shape, space_order, nbpml, dtype,
                                     subdomains)
 
-        # Create square slowness of the wave as symbol `m`
-        if isinstance(vp, np.ndarray):
-            self.m = Function(name="m", grid=self.grid, space_order=space_order)
-        else:
-            self.m = Constant(name="m", value=1/vp**2)
-        self._physical_parameters = ('m',)
-        # Set model velocity, which will also set `m`
-        self.vp = vp
+        physical_parameters = []
 
-        # Create dampening field as symbol `damp`
-        self.damp = Function(name="damp", grid=self.grid)
-        initialize_damp(self.damp, self.nbpml, self.spacing)
+        # Create square slowness of the wave as symbol `m`
+        self._vp = self._gen_phys_param(vp, 'vp', space_order)
+        physical_parameters.append('vp')
+        self._max_vp = np.max(vp)
 
         # Additional parameter fields for TTI operators
-        self.scale = 1.
-
-        if epsilon is not None:
-            if isinstance(epsilon, np.ndarray):
-                self._physical_parameters += ('epsilon',)
-                self.epsilon = Function(name="epsilon", grid=self.grid)
-                initialize_function(self.epsilon, 1 + 2 * epsilon, self.nbpml)
-                # Maximum velocity is scale*max(vp) if epsilon > 0
-                if np.max(self.epsilon.data_with_halo[:]) > 0:
-                    self.scale = np.sqrt(np.max(self.epsilon.data_with_halo[:]))
-            else:
-                self.epsilon = 1 + 2 * epsilon
-                self.scale = epsilon
+        self.epsilon = self._gen_phys_param(epsilon, 'epsilon', space_order)
+        if self.epsilon != 0:
+            physical_parameters.append('epsilon')
+            self.scale = np.sqrt(1 + 2 * np.max(epsilon))
         else:
-            self.epsilon = 1
+            self.scale = 1
 
-        if delta is not None:
-            if isinstance(delta, np.ndarray):
-                self._physical_parameters += ('delta',)
-                self.delta = Function(name="delta", grid=self.grid)
-                initialize_function(self.delta, np.sqrt(1 + 2 * delta), self.nbpml)
-            else:
-                self.delta = delta
-        else:
-            self.delta = 1
+        self.delta = self._gen_phys_param(delta, 'delta', space_order)
+        if self.delta != 0:
+            physical_parameters.append('delta')
 
-        if theta is not None:
-            if isinstance(theta, np.ndarray):
-                self._physical_parameters += ('theta',)
-                self.theta = Function(name="theta", grid=self.grid,
-                                      space_order=space_order)
-                initialize_function(self.theta, theta, self.nbpml)
-            else:
-                self.theta = theta
-        else:
-            self.theta = 0
+        self.theta = self._gen_phys_param(theta, 'theta', space_order)
+        if self.theta != 0:
+            physical_parameters.append('theta')
 
-        if phi is not None:
-            if self.grid.dim < 3:
-                warning("2D TTI does not use an azimuth angle Phi, ignoring input")
-                self.phi = 0
-            elif isinstance(phi, np.ndarray):
-                self._physical_parameters += ('phi',)
-                self.phi = Function(name="phi", grid=self.grid, space_order=space_order)
-                initialize_function(self.phi, phi, self.nbpml)
-            else:
-                self.phi = phi
-        else:
-            self.phi = 0
+        self.phi = self._gen_phys_param(phi, 'phi', space_order)
+        if self.phi != 0 and self.grid.dim == 3:
+            physical_parameters.append('phi')
+
+        self._physical_parameters = as_tuple(physical_parameters)
 
     @property
     def critical_dt(self):
-        """Critical computational time step value from the CFL condition."""
-        # For a fixed time order this number goes down as the space order increases.
+        """
+        Critical computational time step value from the CFL condition.
+        """
+        # For a fixed time order this number decreases as the space order increases.
         #
         # The CFL condtion is then given by
         # dt <= coeff * h / (max(velocity))
         coeff = 0.38 if len(self.shape) == 3 else 0.42
-        dt = self.dtype(coeff * np.min(self.spacing) / (self.scale*np.max(self.vp)))
-        return .001 * int(1000 * dt)
+        dt = self.dtype(coeff * np.min(self.spacing) / (self.scale*self._max_vp))
+        return self.dtype("%.3f" % dt)
 
     @property
     def vp(self):
-        """:class:`numpy.ndarray` holding the model velocity in km/s.
-        .. note::
+        """
+        `numpy.ndarray` holding the model velocity in km/s.
+
+        Notes
+        -----
         Updating the velocity field also updates the square slowness
         ``self.m``. However, only ``self.m`` should be used in seismic
-        operators, since it is of type :class:`Function`.
+        operators, since it is of type `Function`.
         """
         return self._vp
 
     @vp.setter
     def vp(self, vp):
-        """Set a new velocity model and update square slowness
-
-        :param vp : new velocity in km/s
         """
-        self._vp = vp
+        Set a new velocity model and update square slowness.
 
+        Parameters
+        ----------
+        vp : float or array
+            New velocity in km/s.
+        """
         # Update the square slowness according to new value
         if isinstance(vp, np.ndarray):
-            initialize_function(self.m, 1 / (self.vp * self.vp), self.nbpml)
+            if vp.shape == self.vp.shape:
+                self.vp.data[:] = vp[:]
+            elif vp.shape == self.shape:
+                initialize_function(self._vp, vp, self.nbpml)
+            else:
+                raise ValueError("Incorrect input size %s for model of size" % vp.shape +
+                                 " %s without or %s with padding" % (self.shape,
+                                                                     self.vp.shape))
         else:
-            self.m.data = 1 / vp**2
+            self._vp.data = vp
+
+        self._max_vp = np.max(vp)
+
+    @property
+    def m(self):
+        return 1 / (self.vp * self.vp)
 
 
 class ModelElastic(GenericModel):
-    """The physical model used in seismic inversion processes.
-    :param origin: Origin of the model in m as a tuple in (x,y,z) order
-    :param spacing: Grid size in m as a Tuple in (x,y,z) order
-    :param shape: Number of grid points size in (x,y,z) order
-    :param space_order: Order of the spatial stencil discretisation
-    :param vp: P-wave velocity in km/s
-    :param vs: S-wave velocity in km/s
-    :param nbpml: The number of PML layers for boundary damping
-    :param rho: Density in kg/cm^3 (rho=1 for water)
-    The :class:`ModelElastic` provides a symbolic data objects for the
+    """
+    The physical model used in seismic inversion processes.
+
+    Parameters
+    ----------
+    origin : tuple of floats
+        Origin of the model in m as a tuple in (x,y,z) order.
+    spacing : tuple of floats, optional
+        Grid size in m as a Tuple in (x,y,z) order.
+    shape : tuple of int
+        Number of grid points size in (x,y,z) order.
+    space_order : int
+        Order of the spatial stencil discretisation.
+    vp : float or array
+        P-wave velocity in km/s.
+    vs : float or array
+        S-wave velocity in km/s.
+    nbpml : int, optional
+        The number of PML layers for boundary damping.
+    rho : float or array, optional
+        Density in kg/cm^3 (rho=1 for water).
+
+    The `ModelElastic` provides a symbolic data objects for the
     creation of seismic wave propagation operators:
-    :param damp: The damping field for absorbing boundarycondition
+
+    damp : Function, optional
+        The damping field for absorbing boundary condition.
     """
     def __init__(self, origin, spacing, shape, space_order, vp, vs, rho, nbpml=20,
                  dtype=np.float32):
         super(ModelElastic, self).__init__(origin, spacing, shape, space_order,
-                                           nbpml=nbpml, dtype=dtype)
+                                           nbpml=nbpml, dtype=dtype,
+                                           damp_mask=True)
 
-        # Create dampening field as symbol `damp`
-        self.damp = Function(name="damp", grid=self.grid)
-        initialize_damp(self.damp, self.nbpml, self.spacing, mask=True)
+        physical_parameters = []
 
-        # Create square slowness of the wave as symbol `m`
-        if isinstance(vp, np.ndarray):
-            self.vp = Function(name="vp", grid=self.grid, space_order=space_order)
-            initialize_function(self.vp, vp, self.nbpml)
-        else:
-            self.vp = Constant(name="vp", value=vp)
-        self._physical_parameters = ('vp',)
+        self.vp = self._gen_phys_param(vp, 'vp', space_order)
+        physical_parameters.append('vp')
 
-        # Create square slowness of the wave as symbol `m`
-        if isinstance(vs, np.ndarray):
-            self.vs = Function(name="vs", grid=self.grid, space_order=space_order)
-            initialize_function(self.vs, vs, self.nbpml)
-        else:
-            self.vs = Constant(name="vs", value=vs)
-        self._physical_parameters += ('vs',)
+        self.vs = self._gen_phys_param(vs, 'vs', space_order)
+        physical_parameters.append('vs')
 
-        # Create square slowness of the wave as symbol `m`
-        if isinstance(rho, np.ndarray):
-            self.rho = Function(name="rho", grid=self.grid, space_order=space_order)
-            initialize_function(self.rho, rho, self.nbpml)
-        else:
-            self.rho = Constant(name="rho", value=rho)
-        self._physical_parameters += ('rho',)
+        self.rho = self._gen_phys_param(rho, 'rho', space_order)
+        physical_parameters.append('rho')
+
+        self._physical_parameters = as_tuple(physical_parameters)
 
     @property
     def critical_dt(self):
-        """Critical computational time step value from the CFL condition."""
+        """
+        Critical computational time step value from the CFL condition.
+        """
         # For a fixed time order this number goes down as the space order increases.
         #
         # The CFL condtion is then given by
         # dt < h / (sqrt(2) * max(vp)))
-        return self.dtype(.5*np.min(self.spacing) / (np.sqrt(2)*np.max(self.vp.data)))
+        return self.dtype(.5*np.min(self.spacing) / (np.sqrt(2)*mmax(self.vp)))
+
+
+class ModelViscoelastic(ModelElastic):
+    """
+    The physical model used in seismic inversion processes.
+
+    Parameters
+    ----------
+    origin : tuple of floats
+        Origin of the model in m as a tuple in (x,y,z) order.
+    spacing : tuple of floats, optional
+        Grid size in m as a Tuple in (x,y,z) order.
+    shape : tuple of int
+        Number of grid points size in (x,y,z) order.
+    space_order : int
+        Order of the spatial stencil discretisation.
+    vp : float or array
+        P-wave velocity in km/s.
+    qp : float or array
+        P-wave quality factor (dimensionless).
+    vs : float or array
+        S-wave velocity in km/s.
+    qs : float or array
+        S-wave qulaity factor (dimensionless).
+    nbpml : int, optional
+        The number of PML layers for boundary damping.
+    rho : float or array, optional
+        Density in kg/cm^3 (rho=1 for water).
+
+    The `ModelElastic` provides a symbolic data objects for the
+    creation of seismic wave propagation operators:
+
+    damp : Function, optional
+        The damping field for absorbing boundary condition.
+    """
+    def __init__(self, origin, spacing, shape, space_order, vp, qp, vs, qs, rho,
+                 nbpml=20, dtype=np.float32):
+        super(ModelViscoelastic, self).__init__(origin, spacing, shape,
+                                                space_order, vp, vs, rho,
+                                                nbpml=nbpml, dtype=dtype)
+
+        physical_parameters = list(self._physical_parameters)
+
+        self.qp = self._gen_phys_param(qp, 'qp', space_order)
+        physical_parameters.append('qp')
+
+        self.qs = self._gen_phys_param(qs, 'qs', space_order)
+        physical_parameters.append('qs')
+
+        self._physical_parameters = as_tuple(physical_parameters)
+
+    @property
+    def critical_dt(self):
+        """
+        Critical computational time step value from the CFL condition.
+        """
+        # For a fixed time order this number decreases as the space order increases.
+        # See Blanch, J. O., 1995, "A study of viscous effects in seismic modelling,
+        # imaging, and inversion: methodology, computational aspects and sensitivity"
+        # for further details:
+        return self.dtype(6.*np.min(self.spacing) /
+                          (7.*np.sqrt(self.grid.dim)*mmax(self.vp)))

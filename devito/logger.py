@@ -4,8 +4,6 @@ import logging
 import sys
 from contextlib import contextmanager
 
-from devito.parameters import configuration
-
 __all__ = ('set_log_level', 'set_log_noperf',
            'log', 'warning', 'error', 'perf', 'perf_adv', 'dse', 'dse_warning',
            'dle', 'dle_warning',
@@ -14,6 +12,7 @@ __all__ = ('set_log_level', 'set_log_noperf',
 
 logger = logging.getLogger('Devito')
 stream_handler = logging.StreamHandler()
+logger.addHandler(stream_handler)
 
 # Add extra logging levels (note: INFO has value=20, WARNING has value=30)
 DEBUG = logging.DEBUG
@@ -85,28 +84,24 @@ def set_log_level(level, comm=None):
     comm : MPI communicator, optional
         An MPI communicator the logger should be collective over. If provided, only
         rank-0 on that communicator will write to the registered handlers, other
-        ranks will use a :class:`logging.NullHandler`.  By default, ``comm`` is set
+        ranks will use a `logging.NullHandler`.  By default, ``comm`` is set
         to ``None``, so all ranks will use the default handlers.  This could be
         used, for example, if one wants to log to one file per rank.
     """
     if level not in logger_registry:
         raise ValueError("Illegal logging level %s" % level)
 
-    if comm is not None and comm.rank != 0:
-        logger.removeHandler(stream_handler)
-        logger.addHandler(logging.NullHandler())
-    else:
-        logger.addHandler(stream_handler)
-        logger.setLevel(level)
+    if comm is not None:
+        if comm.rank != 0:
+            logger.removeHandler(stream_handler)
+            logger.addHandler(logging.NullHandler())
+
+    logger.setLevel(level)
 
 
 def set_log_noperf():
     """Do not print performance-related messages."""
     logger.setLevel(WARNING)
-
-
-configuration.add('log-level', 'INFO', list(logger_registry),
-                  lambda i: set_log_level(i), False)
 
 
 def log(msg, level=INFO, *args, **kwargs):

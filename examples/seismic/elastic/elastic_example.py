@@ -1,13 +1,14 @@
 import numpy as np
 from argparse import ArgumentParser
 
+from devito import configuration
 from devito.logger import info
 from examples.seismic.elastic import ElasticWaveSolver
 from examples.seismic import demo_model, AcquisitionGeometry
 
 
-def elastic_setup(shape=(50, 50), spacing=(15.0, 15.0), tn=500., space_order=4, nbpml=10,
-                  constant=False, **kwargs):
+def elastic_setup(shape=(50, 50), spacing=(15.0, 15.0), tn=500., space_order=4,
+                  nbpml=10, constant=False, **kwargs):
 
     nrec = 2*shape[0]
     preset = 'constant-elastic' if constant else 'layers-elastic'
@@ -42,7 +43,15 @@ def run(shape=(50, 50), spacing=(20.0, 20.0), tn=1000.0,
     # Define receiver geometry (spread across x, just below surface)
     rec1, rec2, vx, vz, txx, tzz, txz, summary = solver.forward(autotune=autotune)
 
-    return rec1, rec2, vx, vz, txx, tzz, txz, summary
+    return (summary.gflopss, summary.oi, summary.timings,
+            [rec1, rec2, vx, vz, txx, tzz, txz])
+
+
+def test_elastic():
+    _, _, _, [rec1, rec2, vx, vz, txx, tzz, txz] = run()
+    norm = lambda x: np.linalg.norm(x.data.reshape(-1))
+    assert np.isclose(norm(rec1), 20.9175, atol=1e-3, rtol=0)
+    assert np.isclose(norm(rec2), 1.81198, atol=1e-3, rtol=0)
 
 
 if __name__ == "__main__":
@@ -50,15 +59,15 @@ if __name__ == "__main__":
     parser = ArgumentParser(description=description)
     parser.add_argument('--2d', dest='dim2', default=False, action='store_true',
                         help="Preset to determine the physical problem setup")
-    parser.add_argument('-a', '--autotune', default=False, action='store_true',
-                        help="Enable autotuning for block sizes")
+    parser.add_argument('-a', '--autotune', default='off',
+                        choices=(configuration._accepted['autotuning']),
+                        help="Operator auto-tuning mode")
     parser.add_argument("-so", "--space_order", default=4,
                         type=int, help="Space order of the simulation")
     parser.add_argument("--nbpml", default=40,
                         type=int, help="Number of PML layers around the domain")
     parser.add_argument("-dse", default="advanced",
-                        choices=["noop", "basic", "advanced",
-                                 "speculative", "aggressive"],
+                        choices=["noop", "basic", "advanced", "aggressive"],
                         help="Devito symbolic engine (DSE) mode")
     parser.add_argument("-dle", default="advanced",
                         choices=["noop", "advanced", "speculative"],

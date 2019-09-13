@@ -6,7 +6,8 @@ JIT-compile, and run kernels.
 import os
 import sys
 
-from devito.dle import BasicRewriter, init_dle
+from devito.archinfo import Arm, Cpu64, CPU64, Power
+from devito.dle import PlatformRewriter, modes
 from devito.exceptions import InvalidOperator
 from devito.logger import yask as log
 from devito.parameters import Parameters, configuration, add_sub_configuration
@@ -24,6 +25,16 @@ def exit(emsg):
 
 
 log("Backend initialization...")
+
+# Not all devito `platform`s are supported by YASK
+if isinstance(configuration['platform'], (Arm, Power)):
+    raise ValueError("The YASK backend doesn't support platform `%s`" %
+                     configuration['platform'])
+# Some of the supported devito `platform`s (e.g., AMDs) may still be run through
+# YASK -- as they are x86-64 just like Intels -- but a proper `Platform` must be used
+if configuration['platform'] is CPU64:
+    configuration['platform'] = 'intel64'
+
 try:
     import yask as yc
     # YASK compiler factories
@@ -37,8 +48,9 @@ path = os.path.dirname(os.path.dirname(yc.__file__))
 namespace['path'] = path
 namespace['kernel-path'] = os.path.join(path, 'src', 'kernel')
 namespace['yask-output-dir'] = make_tempdir('yask')
-# The YASK compiler expects the generated code under:
+# The YASK compiler expects the generated code in
 # $YASK_OUTPUT_DIR/build/kernel/$stencil.$arch/gen/yask_stencil_code.hpp
+# unless overridden by the YK_CODE_FILE make var
 namespace['yask-lib'] = os.path.join(namespace['yask-output-dir'], 'lib')
 namespace['yask-pylib'] = os.path.join(namespace['yask-output-dir'], 'yask')
 namespace['yask-codegen'] = lambda i, j, k: os.path.join(namespace['yask-output-dir'],
@@ -88,12 +100,10 @@ env_vars_mapper = {
 
 add_sub_configuration(yask_configuration, env_vars_mapper)
 
-# Initialize the DLE
-modes = {'basic': BasicRewriter,
-         'advanced': YaskRewriter,
-         'advanced-safemath': YaskRewriter,
-         'speculative': YaskRewriter}
-init_dle(modes)
+# Add YASK-specific DLE modes
+modes.add(Cpu64, {'noop': PlatformRewriter,
+                  'advanced': YaskRewriter,
+                  'speculative': YaskRewriter})
 
 # The following used by backends.backendSelector
 from devito.types import SparseFunction, SparseTimeFunction  # noqa

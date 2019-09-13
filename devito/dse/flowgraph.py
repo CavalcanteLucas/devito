@@ -1,12 +1,9 @@
 from collections import OrderedDict
 from itertools import islice
 
-from cached_property import cached_property
-
 from devito.ir.equations import ClusterizedEq
-from devito.symbolics import (as_symbol, retrieve_indexed, retrieve_terminals,
-                              q_indirect, q_timedimension)
-from devito.tools import DefaultOrderedDict, flatten, filter_ordered
+from devito.symbolics import (as_symbol, retrieve_terminals, q_timedimension)
+from devito.tools import DefaultOrderedDict, flatten
 from devito.types import Dimension, Symbol
 
 __all__ = ['FlowGraph']
@@ -70,8 +67,7 @@ class FlowGraph(OrderedDict):
     The input and output edges of a node ``n`` are encoded in ``n.reads`` and
     ``n.readby``, respectively.
 
-    Operations may involve scalars and indexed objects (arrays). The indices
-    of the indexed objects represent either "space" or "time" dimensions.
+    Operations may involve scalars and indexed objects (arrays).
     """
 
     def __init__(self, exprs, **kwargs):
@@ -87,11 +83,7 @@ class FlowGraph(OrderedDict):
         reads = DefaultOrderedDict(set)
         readby = DefaultOrderedDict(set)
         for k, v in mapper.items():
-            handle = retrieve_terminals(v.rhs)
-            for i in list(handle):
-                if i.is_Indexed:
-                    for idx in i.indices:
-                        handle |= retrieve_terminals(idx)
+            handle = retrieve_terminals(v.rhs, deep=True)
             reads[k].update(set(flatten([tensor_map.get(as_symbol(i), [])
                                          for i in handle])))
             for i in reads[k]:
@@ -114,44 +106,6 @@ class FlowGraph(OrderedDict):
         nodes = [(i, Node(mapper[i], reads=reads[i], readby=readby[i]))
                  for i in processed]
         super(FlowGraph, self).__init__(nodes, **kwargs)
-
-        # Determine indices along the space and time dimensions
-        terms = [v for k, v in self.items() if v.is_Tensor and not q_indirect(k)]
-        indices = filter_ordered(flatten([i.function.indices for i in terms]))
-        self.space_indices = tuple(i for i in indices if i.is_Space)
-        self.time_indices = tuple(i for i in indices if i.is_Time)
-
-    def trace(self, key, readby=False, strict=False):
-        """
-        Return the sequence of operations required to compute the node ``key``.
-        If ``readby = True``, then return the sequence of operations that will
-        depend on ``key``, instead. With ``strict = True``, drop ``key`` from the
-        result.
-        """
-        if key not in self:
-            return []
-
-        # OrderedDicts, besides preserving the scheduling order, also prevent
-        # scheduling the same node more than once
-        found = OrderedDict()
-        queue = OrderedDict([(key, self[key])])
-        while queue:
-            k, v = queue.popitem(last=False)
-            reads = self.extract(k, readby=readby)
-            if set(reads).issubset(set(found.values())):
-                # All dependencies satisfied, schedulable
-                found[k] = v
-            else:
-                # Tensors belong to other traces, so they can be scheduled straight away
-                tensors = [i for i in reads if i.is_Tensor]
-                found = OrderedDict(list(found.items()) + [(i.lhs, i) for i in tensors])
-                # Postpone the rest until all dependening nodes got scheduled
-                scalars = [i for i in reads if i.is_Scalar]
-                queue = OrderedDict([(i.lhs, i) for i in scalars] +
-                                    [(k, v)] + list(queue.items()))
-        if strict is True:
-            found.pop(key)
-        return tuple(found.values())
 
     def time_invariant(self, expr=None):
         """
@@ -192,56 +146,6 @@ class FlowGraph(OrderedDict):
             queue.extend([self[i].rhs for i in nodes])
         return True
 
-    def is_index(self, key):
-        """
-        Return True if ``key`` is used as array index in an expression of the
-        FlowGraph, False otherwise.
-        """
-        if key not in self:
-            return False
-        match = key.base.label if self[key].is_Tensor else key
-        for i in self.extract(key, readby=True):
-            for e in retrieve_indexed(i):
-                if any(match in idx.free_symbols for idx in e.indices):
-                    return True
-        return False
-
-    def extract(self, key, readby=False):
-        """
-        Return the list of nodes appearing in ``key.reads``, in program order
-        (ie, based on the order in which the nodes appear in ``self``). If
-        ``readby is True``, then return instead the list of nodes appearing
-        ``key.readby``, in program order.
-
-        Examples
-        --------
-        Given the following sequence of operations: ::
-
-            t1 = ...
-            t0 = ...
-            u[i, j] = ... v ...
-            u[3, j] = ...
-            v = t0 + t1 + u[z, k]
-            t2 = ...
-
-        Assuming ``key == v`` and ``readby is False`` (as by default), return
-        the following list of Node objects: ::
-
-            [t1, t0, u[i, j], u[3, j]]
-
-        If ``readby is True``, return: ::
-
-            [v, t2]
-        """
-        if key not in self:
-            return []
-        match = self[key].reads if readby is False else self[key].readby
-        found = []
-        for k, v in self.items():
-            if k in match:
-                found.append(v)
-        return found
-
     def __getitem__(self, key):
         if not isinstance(key, slice):
             return super(FlowGraph, self).__getitem__(key)
@@ -255,31 +159,6 @@ class FlowGraph(OrderedDict):
         except ValueError:
             stop = None
         return FlowGraph(islice(list(self.items()), start, stop))
-
-    @cached_property
-    def unknown(self):
-        """
-        Return all symbols appearing in self for which a node is not available.
-        """
-        known = {v.function for v in self.values()}
-        reads = set([i.function for i in
-                     flatten(retrieve_terminals(v.rhs) for v in self.values())])
-        return reads - known
-
-    @cached_property
-    def tensors(self):
-        """
-        Return all occurrences of the tensors in ``self`` keyed by function.
-        """
-        mapper = {}
-        for v in self.values():
-            handle = retrieve_indexed(v)
-            for i in handle:
-                found = mapper.setdefault(i.function, [])
-                if i not in found:
-                    # Not using sets to preserve order
-                    found.append(i)
-        return mapper
 
 
 def makeit_ssa(exprs):

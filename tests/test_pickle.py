@@ -7,6 +7,7 @@ from conftest import skipif
 from devito import (Constant, Eq, Function, TimeFunction, SparseFunction, Grid,
                     TimeDimension, SteppingDimension, Operator)
 from devito.mpi.routines import MPIStatusObject, MPIRequestObject
+from devito.types import Symbol as dSymbol, Scalar
 from devito.profiling import Timer
 from devito.symbolics import IntDiv, ListInitializer, FunctionFromPointer
 from examples.seismic import (demo_model, AcquisitionGeometry,
@@ -64,6 +65,27 @@ def test_sparse_function():
     assert sf.space_order == new_sf.space_order
     assert sf.dtype == new_sf.dtype
     assert sf.npoint == new_sf.npoint
+
+
+def test_internal_symbols():
+    s = dSymbol(name='s', dtype=np.float32)
+    pkl_s = pickle.dumps(s)
+    new_s = pickle.loads(pkl_s)
+    assert new_s.name == s.name
+    assert new_s.dtype is np.float32
+
+    s = Scalar(name='s', dtype=np.int32, is_const=True)
+    pkl_s = pickle.dumps(s)
+    new_s = pickle.loads(pkl_s)
+    assert new_s.name == s.name
+    assert new_s.dtype is np.int32
+    assert new_s.is_const is True
+
+    s = Scalar(name='s', nonnegative=True)
+    pkl_s = pickle.dumps(s)
+    new_s = pickle.loads(pkl_s)
+    assert new_s.name == s.name
+    assert new_s.assumptions0['nonnegative'] is True
 
 
 def test_receiver():
@@ -309,7 +331,7 @@ def test_full_model():
     # Test Model pickling
     pkl_model = pickle.dumps(model)
     new_model = pickle.loads(pkl_model)
-    assert np.isclose(np.linalg.norm(model.vp-new_model.vp), 0)
+    assert np.isclose(np.linalg.norm(model.vp.data[:]-new_model.vp.data[:]), 0)
 
     f0 = .010
     dt = model.critical_dt

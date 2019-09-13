@@ -2,8 +2,9 @@
 Extended SymPy hierarchy.
 """
 
+import numpy as np
 import sympy
-from sympy import Expr, Integer, Float, Symbol
+from sympy import Expr, Integer, Float, Function, Symbol
 from sympy.core.basic import _aresame
 from sympy.functions.elementary.trigonometric import TrigonometricFunction
 
@@ -11,8 +12,9 @@ from devito.tools import Pickable, as_tuple
 
 __all__ = ['FrozenExpr', 'Eq', 'CondEq', 'CondNe', 'Mul', 'Add', 'Pow', 'IntDiv',
            'FunctionFromPointer', 'FieldFromPointer', 'FieldFromComposite',
-           'ListInitializer', 'Byref', 'IndexedPointer', 'Macro', 'taylor_sin',
-           'taylor_cos', 'bhaskara_sin', 'bhaskara_cos']
+           'ListInitializer', 'Byref', 'IndexedPointer', 'Macro', 'Literal',
+           'taylor_sin', 'taylor_cos', 'bhaskara_sin', 'bhaskara_cos',
+           'INT', 'FLOAT', 'DOUBLE', 'FLOOR', 'cast_mapper']
 
 
 class FrozenExpr(Expr):
@@ -69,6 +71,10 @@ class CondEq(sympy.Eq, FrozenExpr):
     def canonical(self):
         return self
 
+    @property
+    def negated(self):
+        return CondNe(*self.args, evaluate=False)
+
 
 class CondNe(sympy.Ne, FrozenExpr):
 
@@ -83,6 +89,10 @@ class CondNe(sympy.Ne, FrozenExpr):
     @property
     def canonical(self):
         return self
+
+    @property
+    def negated(self):
+        return CondEq(*self.args, evaluate=False)
 
 
 class Mul(sympy.Mul, FrozenExpr):
@@ -114,16 +124,23 @@ class IntDiv(sympy.Expr):
     is_Atom = True
 
     def __new__(cls, lhs, rhs, params=None):
-        rhs = Integer(rhs)
-        if rhs == 0:
-            raise ValueError("Cannot divide by 0")
-        elif rhs == 1:
-            return lhs
-        else:
-            obj = sympy.Expr.__new__(cls, lhs, rhs)
-            obj.lhs = lhs
-            obj.rhs = rhs
-            return obj
+        try:
+            rhs = Integer(rhs)
+            if rhs == 0:
+                raise ValueError("Cannot divide by 0")
+            elif rhs == 1:
+                return lhs
+        except TypeError:
+            # We must be sure the symbolic RHS is of type int
+            if not hasattr(rhs, 'dtype'):
+                raise ValueError("Symbolic RHS `%s` lacks dtype" % rhs)
+            if not issubclass(rhs.dtype, np.integer):
+                raise ValueError("Symbolic RHS `%s` must be of type `int`, found "
+                                 "`%s` instead" % (rhs, rhs.dtype))
+        obj = sympy.Expr.__new__(cls, lhs, rhs)
+        obj.lhs = lhs
+        obj.rhs = rhs
+        return obj
 
     def __str__(self):
         return "%s / %s" % (self.lhs, self.rhs)
@@ -245,6 +262,8 @@ class ListInitializer(sympy.Expr, Pickable):
         for p in as_tuple(params):
             if isinstance(p, str):
                 args.append(Symbol(p))
+            elif isinstance(p, int):
+                args.append(p)
             elif not isinstance(p, Expr):
                 raise ValueError("`params` must be an iterable of Expr or str")
             else:
@@ -338,6 +357,22 @@ class Macro(sympy.Symbol):
     Symbolic representation of a C macro.
     """
     pass
+
+
+class Literal(sympy.Symbol):
+
+    """
+    Symbolic representation of a Literal element.
+    """
+    pass
+
+
+INT = Function('INT')
+FLOAT = Function('FLOAT')
+DOUBLE = Function('DOUBLE')
+FLOOR = Function('floor')
+
+cast_mapper = {np.float32: FLOAT, float: DOUBLE, np.float64: DOUBLE}
 
 
 class taylor_sin(TrigonometricFunction):

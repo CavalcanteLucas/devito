@@ -1,4 +1,5 @@
-from collections import Iterable, OrderedDict, namedtuple
+from collections import OrderedDict, namedtuple
+from collections.abc import Iterable
 
 import sympy
 from sympy import Number, Indexed, Symbol, LM, LC
@@ -13,8 +14,8 @@ __all__ = ['freeze', 'unfreeze', 'evaluate', 'xreplace_constrained', 'xreplace_i
 
 def freeze(expr):
     """
-    Reconstruct ``expr`` turning all :class:`sympy.Mul` and :class:`sympy.Add`
-    into :class:`FrozenExpr` equivalents.
+    Reconstruct ``expr`` turning all sympy.Mul and sympy.Add
+    into FrozenExpr equivalents.
     """
     if expr.is_Atom or expr.is_Indexed:
         return expr
@@ -40,7 +41,7 @@ def freeze(expr):
 
 def unfreeze(expr):
     """
-    Reconstruct ``expr`` turning all :class:`FrozenExpr` subtrees into their
+    Reconstruct ``expr`` turning all FrozenExpr subtrees into their
     SymPy equivalents.
     """
     if expr.is_Atom or expr.is_Indexed:
@@ -51,7 +52,7 @@ def unfreeze(expr):
 
 def evaluate(expr, **subs):
     """
-    Numerically evaluate a SymPy expression. Subtrees of type :class:`FrozenExpr`
+    Numerically evaluate a SymPy expression. Subtrees of type FrozenExpr
     are forcibly evaluated.
     """
     expr = unfreeze(expr)
@@ -115,7 +116,7 @@ def xreplace_constrained(exprs, make, rule=None, costmodel=lambda e: True, repea
             if flag and costmodel(base):
                 return expr.func(replace(base), expr.exp, evaluate=False), False
             else:
-                return expr.func(base, expr.exp, evaluate=False), flag
+                return expr.func(base, expr.exp, evaluate=False), rule(expr)
         else:
             children = [run(a) for a in expr.args]
             matching = [a for a, flag in children if flag]
@@ -254,8 +255,7 @@ def split_affine(expr):
 def indexify(expr):
     """
     Given a SymPy expression, return a new SymPy expression in which all
-    :class:`AbstractFunction` objects have been converted into :class:`Indexed`
-    objects.
+    AbstractFunction objects have been converted into Indexed objects.
     """
     mapper = {}
     for i in retrieve_functions(expr):

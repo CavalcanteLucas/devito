@@ -8,6 +8,7 @@ from conftest import skipif
 from devito import (ConditionalDimension, Grid, Function, TimeFunction, SparseFunction,  # noqa
                     Eq, Operator, Constant, SubDimension, switchconfig)
 from devito.ir.iet import Iteration, FindNodes, retrieve_iteration_tree
+from devito.types import Array
 
 
 @skipif('ops')
@@ -88,11 +89,29 @@ class TestSubDimension(object):
         assert np.all(u.data[1, -1, :, :] == 1)
         assert np.all(u.data[1, 1:3, :, :] == 2)
 
+    @skipif('yask')
+    def test_symbolic_size(self):
+        """Check the symbolic size of all possible SubDimensions is as expected."""
+        grid = Grid(shape=(4,))
+        x, = grid.dimensions
+        thickness = 4
+
+        xleft = SubDimension.left(name='xleft', parent=x, thickness=thickness)
+        assert xleft.symbolic_size == xleft.thickness.left[0]
+
+        xi = SubDimension.middle(name='xi', parent=x,
+                                 thickness_left=thickness, thickness_right=thickness)
+        assert xi.symbolic_size == (x.symbolic_max - x.symbolic_min -
+                                    xi.thickness.left[0] - xi.thickness.right[0] + 1)
+
+        xright = SubDimension.right(name='xright', parent=x, thickness=thickness)
+        assert xright.symbolic_size == xright.thickness.right[0]
+
     def test_bcs(self):
         """
         Tests application of an Operator consisting of multiple equations
         defined over different sub-regions, explicitly created through the
-        use of :class:`SubDimension`s.
+        use of SubDimensions.
         """
         grid = Grid(shape=(20, 20))
         x, y = grid.dimensions
@@ -128,7 +147,7 @@ class TestSubDimension(object):
     @skipif('yask')
     def test_flow_detection_interior(self):
         """
-        Test detection of flow directions when :class:`SubDimension`s are used
+        Test detection of flow directions when SubDimensions are used
         (in this test they are induced by the ``interior`` subdomain).
 
         Stencil uses values at new timestep as well as those at previous ones
@@ -203,7 +222,7 @@ class TestSubDimension(object):
         for i, e in enumerate(list(exprs)):
             exprs[i] = eval(e)
 
-        op = Operator(exprs)
+        op = Operator(exprs, dle='noop')
         iterations = FindNodes(Iteration).visit(op)
         assert all(i.is_Sequential for i in iterations if i.dim.name != expected)
         assert all(i.is_Parallel for i in iterations if i.dim.name == expected)
@@ -229,7 +248,7 @@ class TestSubDimension(object):
         for i, e in enumerate(list(exprs)):
             exprs[i] = eval(e)
 
-        op = Operator(exprs)
+        op = Operator(exprs, dle='noop')
         iterations = FindNodes(Iteration).visit(op)
         vectorizable = [i.dim.name for i in iterations if i.is_Vectorizable]
         assert set(vectorizable) == set(expected)
@@ -238,7 +257,7 @@ class TestSubDimension(object):
         """
         Tests application of an Operator consisting of a subdimension
         defined over different sub-regions, explicitly created through the
-        use of :class:`SubDimension`s.
+        use of SubDimensions.
         """
         grid = Grid(shape=(20, 20))
         x, y = grid.dimensions
@@ -278,7 +297,7 @@ class TestSubDimension(object):
         """
         Tests application of an Operator consisting of a subdimension
         defined over different sub-regions, explicitly created through the
-        use of :class:`SubDimension`s.
+        use of SubDimensions.
 
         This tests that flow direction is not being automatically inferred
         from whether the subdimension is on the left or right boundary.
@@ -314,7 +333,7 @@ class TestSubDimension(object):
         """
         Tests application of an Operator consisting of a subdimension
         defined over different sub-regions, explicitly created through the
-        use of :class:`SubDimension`s.
+        use of SubDimensions.
 
         Different from ``test_subdimmiddle_parallel`` because an interior
         dimension cannot be evaluated in parallel.
@@ -355,7 +374,7 @@ class TestSubDimension(object):
         """
         Tests application of an Operator consisting of a subdimension
         defined over different sub-regions, explicitly created through the
-        use of :class:`SubDimension`s.
+        use of SubDimensions.
 
         This tests that flow direction is not being automatically inferred
         from whether the subdimension is on the left or right boundary.
@@ -411,12 +430,33 @@ class TestSubDimension(object):
         assert np.all(u.data[1, 0, :] == 2.)
         assert np.all(u.data[1, 1:18, 1:18] == 0.)
 
+    @skipif('yask')
+    def test_arrays_defined_over_subdims(self):
+        """
+        Check code generation when an Array uses a SubDimension.
+        """
+        grid = Grid(shape=(3,))
+        x, = grid.dimensions
+        xi, = grid.interior.dimensions
+
+        f = Function(name='f', grid=grid)
+        a = Array(name='a', dimensions=(xi,), dtype=grid.dtype)
+        op = Operator([Eq(a[xi], 1), Eq(f, f + a[xi + 1], subdomain=grid.interior)],
+                      dle=('advanced', {'openmp': False}))
+        assert len(op.parameters) == 6
+        # neither `x_size` nor `xi_size` are expected here
+        assert not any(i.name in ('x_size', 'xi_size') for i in op.parameters)
+        # Try running it -- regardless of what it will produce, this should run
+        # ie, this checks this error isn't raised:
+        # "ValueError: No value found for parameter xi_size"
+        op()
+
 
 @skipif(['yask', 'ops'])
 class TestConditionalDimension(object):
 
     """A collection of tests to check the correct functioning of
-    :class:`ConditionalDimension`s."""
+    ConditionalDimensions."""
 
     def test_basic(self):
         nt = 19
@@ -436,6 +476,46 @@ class TestConditionalDimension(object):
         assert(time_subsampled in usave.indices)
 
         eqns = [Eq(u.forward, u + 1.), Eq(u2.forward, u2 + 1.), Eq(usave, u)]
+        op = Operator(eqns)
+        op.apply(t_M=nt-2)
+        assert np.all(np.allclose(u.data[(nt-1) % 3], nt-1))
+        assert np.all([np.allclose(u2.data[i], i) for i in range(nt)])
+        assert np.all([np.allclose(usave.data[i], i*factor)
+                      for i in range((nt+factor-1)//factor)])
+
+    def test_basic_shuffles(self):
+        """
+        Like ``test_basic``, but with different equation orderings. Nevertheless,
+        we assert against the same exact values as in ``test_basic``, since we
+        save `u`, not `u.forward`.
+        """
+        nt = 19
+        grid = Grid(shape=(11, 11))
+        time = grid.time_dim
+
+        u = TimeFunction(name='u', grid=grid)
+
+        u2 = TimeFunction(name='u2', grid=grid, save=nt)
+
+        factor = 4
+        time_subsampled = ConditionalDimension('t_sub', parent=time, factor=factor)
+        usave = TimeFunction(name='usave', grid=grid, save=(nt+factor-1)//factor,
+                             time_dim=time_subsampled)
+
+        # Shuffle 1
+        eqns = [Eq(usave, u), Eq(u.forward, u + 1.), Eq(u2.forward, u2 + 1.)]
+        op = Operator(eqns)
+        op.apply(t_M=nt-2)
+        assert np.all(np.allclose(u.data[(nt-1) % 3], nt-1))
+        assert np.all([np.allclose(u2.data[i], i) for i in range(nt)])
+        assert np.all([np.allclose(usave.data[i], i*factor)
+                      for i in range((nt+factor-1)//factor)])
+
+        # Shuffle 2
+        usave.data[:] = 0.
+        u.data[:] = 0.
+        u2.data[:] = 0.
+        eqns = [Eq(u.forward, u + 1.), Eq(usave, u), Eq(u2.forward, u2 + 1.)]
         op = Operator(eqns)
         op.apply(t_M=nt-2)
         assert np.all(np.allclose(u.data[(nt-1) % 3], nt-1))
@@ -680,3 +760,28 @@ class TestConditionalDimension(object):
         assert np.all(f.data[0, -1] == 0.)
         assert np.all(f.data[0, :, 0] == 0.)
         assert np.all(f.data[0, :, -1] == 0.)
+
+    def test_symbolic_factor(self):
+        """
+        Test ConditionalDimension with symbolic factor (provided as a Constant).
+        """
+        g = Grid(shape=(4, 4, 4))
+
+        u = TimeFunction(name='u', grid=g, time_order=0)
+
+        fact = Constant(name='fact', dtype=np.int32, value=4)
+        tsub = ConditionalDimension(name='tsub', parent=g.time_dim, factor=fact)
+        usave = TimeFunction(name='usave', grid=g, time_dim=tsub, save=4)
+
+        op = Operator([Eq(u, u + 1), Eq(usave, u)])
+
+        op.apply(time=7)  # Use `fact`'s default value, 4
+        assert np.all(usave.data[0] == 1)
+        assert np.all(usave.data[1] == 5)
+
+        u.data[:] = 0.
+        op.apply(time=7, fact=2)
+        assert np.all(usave.data[0] == 1)
+        assert np.all(usave.data[1] == 3)
+        assert np.all(usave.data[2] == 5)
+        assert np.all(usave.data[3] == 7)

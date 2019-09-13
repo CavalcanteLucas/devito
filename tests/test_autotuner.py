@@ -10,14 +10,13 @@ from devito import (Grid, Function, TimeFunction, Eq, Operator, configuration,
                     switchconfig)
 from devito.data import LEFT
 
-pytestmark = skipif(['yask', 'ops'])
+pytestmark = skipif(['yask', 'ops'], whole_module=True)
 
-
-# To enforce cross-compilation for a 4-core architecture
-class MockArch(object):
-    @classmethod
-    def cpu_count(cls):
-        return 4
+# All core-specific imports *must* be avoided if `backend != core`, otherwise
+# a backend reinitialization would be triggered via `devito/core/.__init__.py`,
+# thus invalidating all of the future tests. This is guaranteed by the
+# `pytestmark` above
+from devito.core.autotuning import options  # noqa
 
 
 @switchconfig(log_level='DEBUG')
@@ -70,8 +69,6 @@ def test_timesteps_per_at_run():
     ``autotuning.core.options['squeezer']`` timesteps, for an operator
     performing the increment ``a[t + timeorder, ...] = f(a[t, ...], ...)``.
     """
-    from devito.core.autotuning import options
-
     shape = (30, 30, 30)
     grid = Grid(shape=shape)
     x, y, z = grid.dimensions
@@ -99,13 +96,13 @@ def test_timesteps_per_at_run():
         op = Operator(stencil, dle=('blocking', {'openmp': False, 'blockalways': True}))
         op(infield=infield, outfield=outfield, time=20, autotune=True)
         assert op._state['autotuning'][-1]['runs'] == 4
-        assert op._state['autotuning'][-1]['tpr'] == options['squeezer']+1
+        assert op._state['autotuning'][-1]['tpr'] == options['squeezer'] + 1
 
 
 @switchconfig(profiling='advanced')
 def test_mode_runtime_forward():
     """Test autotuning in runtime mode."""
-    grid = Grid(shape=(64, 64, 64))
+    grid = Grid(shape=(96, 96, 96))
     f = TimeFunction(name='f', grid=grid)
 
     op = Operator(Eq(f.forward, f + 1.), dle=('advanced', {'openmp': False}))
@@ -115,7 +112,7 @@ def test_mode_runtime_forward():
     assert op._state['autotuning'][0]['runs'] == 6
 
     # AT is expected to have executed 30 timesteps
-    assert summary['section0'].itershapes[0][0] == 101-30
+    assert summary[('section0', None)].itershapes[0][0] == 101-30
     assert np.all(f.data[0] == 100)
     assert np.all(f.data[1] == 101)
 
@@ -123,7 +120,7 @@ def test_mode_runtime_forward():
 @switchconfig(profiling='advanced')
 def test_mode_runtime_backward():
     """Test autotuning in runtime mode."""
-    grid = Grid(shape=(64, 64, 64))
+    grid = Grid(shape=(96, 96, 96))
     f = TimeFunction(name='f', grid=grid)
 
     op = Operator(Eq(f.backward, f + 1.), dle=('advanced', {'openmp': False}))
@@ -133,7 +130,7 @@ def test_mode_runtime_backward():
     assert op._state['autotuning'][0]['runs'] == 6
 
     # AT is expected to have executed 30 timesteps
-    assert summary['section0'].itershapes[0][0] == 101-30
+    assert summary[('section0', None)].itershapes[0][0] == 101-30
     assert np.all(f.data[0] == 101)
     assert np.all(f.data[1] == 100)
 
@@ -141,7 +138,7 @@ def test_mode_runtime_backward():
 @switchconfig(profiling='advanced')
 def test_mode_destructive():
     """Test autotuning in destructive mode."""
-    grid = Grid(shape=(64, 64, 64))
+    grid = Grid(shape=(96, 96, 96))
     f = TimeFunction(name='f', grid=grid, time_order=0)
 
     op = Operator(Eq(f, f + 1.), dle=('advanced', {'openmp': False}))
@@ -154,27 +151,27 @@ def test_mode_destructive():
 
 
 def test_blocking_only():
-    grid = Grid(shape=(64, 64, 64))
+    grid = Grid(shape=(96, 96, 96))
     f = TimeFunction(name='f', grid=grid)
 
     op = Operator(Eq(f.forward, f + 1.), dle=('advanced', {'openmp': False}))
     op.apply(time=0, autotune=True)
 
     assert op._state['autotuning'][0]['runs'] == 6
-    assert op._state['autotuning'][0]['tpr'] == 5
+    assert op._state['autotuning'][0]['tpr'] == options['squeezer'] + 1
     assert len(op._state['autotuning'][0]['tuned']) == 2
     assert 'nthreads' not in op._state['autotuning'][0]['tuned']
 
 
 def test_mixed_blocking_nthreads():
-    grid = Grid(shape=(64, 64, 64))
+    grid = Grid(shape=(96, 96, 96))
     f = TimeFunction(name='f', grid=grid)
 
     op = Operator(Eq(f.forward, f + 1.), dle=('advanced', {'openmp': True}))
     op.apply(time=100, autotune=True)
 
     assert op._state['autotuning'][0]['runs'] == 6
-    assert op._state['autotuning'][0]['tpr'] == 5
+    assert op._state['autotuning'][0]['tpr'] == options['squeezer'] + 1
     assert len(op._state['autotuning'][0]['tuned']) == 3
     assert 'nthreads' in op._state['autotuning'][0]['tuned']
 
@@ -184,34 +181,34 @@ def test_tti_aggressive():
     wave_solver = tti_operator(dse='aggressive', dle=('advanced', {'openmp': False}))
     op = wave_solver.op_fwd(kernel='centered', save=False)
     op.apply(time=0, autotune='aggressive')
-    assert op._state['autotuning'][0]['runs'] == 33
+    assert op._state['autotuning'][0]['runs'] == 28
 
 
-@switchconfig(develop_mode=False, cross_compile=MockArch)
-@patch("devito.dle.parallelizer.Ompizer.COLLAPSE", 1)
+@switchconfig(develop_mode=False)
+@patch("devito.dle.parallelizer.Ompizer.COLLAPSE_NCORES", 1)
 def test_discarding_runs():
     grid = Grid(shape=(64, 64, 64))
     f = TimeFunction(name='f', grid=grid)
 
     op = Operator(Eq(f.forward, f + 1.), dle=('advanced', {'openmp': True}))
-    op.apply(time=100, autotune='aggressive')
+    op.apply(time=100, nthreads=4, autotune='aggressive')
 
-    assert op._state['autotuning'][0]['runs'] == 20
-    assert op._state['autotuning'][0]['tpr'] == 5
+    assert op._state['autotuning'][0]['runs'] == 18
+    assert op._state['autotuning'][0]['tpr'] == options['squeezer'] + 1
     assert len(op._state['autotuning'][0]['tuned']) == 3
     assert op._state['autotuning'][0]['tuned']['nthreads'] == 4
 
     # With 1 < 4 threads, the AT eventually tries many more combinations
     op.apply(time=100, nthreads=1, autotune='aggressive')
 
-    assert op._state['autotuning'][1]['runs'] == 30
-    assert op._state['autotuning'][1]['tpr'] == 5
+    assert op._state['autotuning'][1]['runs'] == 25
+    assert op._state['autotuning'][1]['tpr'] == options['squeezer'] + 1
     assert len(op._state['autotuning'][1]['tuned']) == 3
     assert op._state['autotuning'][1]['tuned']['nthreads'] == 1
 
 
 @skipif('nompi')
-@pytest.mark.parallel(mode=2)
+@pytest.mark.parallel(mode=[(2, 'diag'), (2, 'full')])
 def test_at_w_mpi():
     """Make sure autotuning works in presence of MPI. MPI ranks work
     in isolation to determine the best block size, locally."""
@@ -222,7 +219,7 @@ def test_at_w_mpi():
     f = TimeFunction(name='f', grid=grid, time_order=1)
     f.data_with_halo[:] = 1.
 
-    eq = Eq(f.forward, f[t, x, y-1] + f[t, x, y+1])
+    eq = Eq(f.forward, f[t, x-1, y] + f[t, x+1, y])
     op = Operator(eq, dle=('advanced', {'openmp': False, 'blockinner': True}))
 
     op.apply(time=-1, autotune=('basic', 'runtime'))
@@ -238,7 +235,119 @@ def test_at_w_mpi():
 
     # Check the halo hasn't been touched during AT
     glb_pos_map = grid.distributor.glb_pos_map
-    if LEFT in glb_pos_map[y]:
-        assert np.all(f._data_ro_with_inhalo[:, :, -1] == 1)
+    if LEFT in glb_pos_map[x]:
+        assert np.all(f._data_ro_with_inhalo[:, -1] == 1)
     else:
-        assert np.all(f._data_ro_with_inhalo[:, :, 0] == 1)
+        assert np.all(f._data_ro_with_inhalo[:, 0] == 1)
+
+    # Finally, try running w/o AT, just to be sure nothing was broken
+    f.data_with_halo[:] = 1.
+    op.apply(time=2)
+    if LEFT in glb_pos_map[x]:
+        assert np.all(f.data_ro_domain[1, 0] == 5.)
+        assert np.all(f.data_ro_domain[1, 1] == 7.)
+        assert np.all(f.data_ro_domain[1, 2:4] == 8.)
+    else:
+        assert np.all(f.data_ro_domain[1, 4:6] == 8)
+        assert np.all(f.data_ro_domain[1, 6] == 7)
+        assert np.all(f.data_ro_domain[1, 7] == 5)
+
+
+def test_multiple_blocking():
+    """
+    Test that if there are more than one blocked Iteration nests, then
+    the autotuner works "incrementally" -- it starts determining the best block
+    shape for the first Iteration nest, then it moves on to the second one,
+    then the third, etc. IOW, the autotuner must not be attempting the
+    cartesian product of all possible block shapes across the various
+    blocked nests.
+    """
+    grid = Grid(shape=(96, 96, 96))
+
+    u = TimeFunction(name='u', grid=grid, space_order=2)
+    v = TimeFunction(name='v', grid=grid)
+
+    op = Operator([Eq(u.forward, u + 1), Eq(v.forward, u.forward.dx2 + v + 1)],
+                  dle=('blocking', {'openmp': False}))
+
+    # First of all, make sure there are indeed two different loop nests
+    assert 'bf0' in op._func_table
+    assert 'bf1' in op._func_table
+
+    # 'basic' mode
+    op.apply(time_M=0, autotune='basic')
+    assert op._state['autotuning'][0]['runs'] == 12  # 6 for each Iteration nest
+    assert op._state['autotuning'][0]['tpr'] == options['squeezer'] + 1
+    assert len(op._state['autotuning'][0]['tuned']) == 4
+
+    # 'aggressive' mode
+    op.apply(time_M=0, autotune='aggressive')
+    assert op._state['autotuning'][1]['runs'] == 60
+    assert op._state['autotuning'][1]['tpr'] == options['squeezer'] + 1
+    assert len(op._state['autotuning'][1]['tuned']) == 4
+
+    # With OpenMP, we tune over one more argument (`nthreads`), though the AT
+    # will only attempt one value
+    op = Operator([Eq(u.forward, u + 1), Eq(v.forward, u.forward.dx2 + v + 1)],
+                  dle=('blocking', {'openmp': True}))
+    op.apply(time_M=0, autotune='basic')
+    assert op._state['autotuning'][0]['runs'] == 12
+    assert op._state['autotuning'][0]['tpr'] == options['squeezer'] + 1
+    assert len(op._state['autotuning'][0]['tuned']) == 5
+
+
+def test_hierarchical_blocking():
+    grid = Grid(shape=(64, 64, 64))
+
+    u = TimeFunction(name='u', grid=grid, space_order=2)
+
+    op = Operator(Eq(u.forward, u + 1), dle=('blocking', {'openmp': False,
+                                                          'blocklevels': 2}))
+
+    # 'basic' mode
+    op.apply(time_M=0, autotune='basic')
+    assert op._state['autotuning'][0]['runs'] == 10
+    assert op._state['autotuning'][0]['tpr'] == options['squeezer'] + 1
+    assert len(op._state['autotuning'][0]['tuned']) == 4
+
+    # 'aggressive' mode
+    op.apply(time_M=0, autotune='aggressive')
+    assert op._state['autotuning'][1]['runs'] == 38
+    assert op._state['autotuning'][1]['tpr'] == options['squeezer'] + 1
+    assert len(op._state['autotuning'][1]['tuned']) == 4
+
+
+def test_multiple_threads():
+    """
+    Test autotuning when different ``num_threads`` for a given OpenMP parallel
+    region are attempted.
+    """
+    grid = Grid(shape=(96, 96, 96))
+
+    v = TimeFunction(name='v', grid=grid)
+
+    op = Operator(Eq(v.forward, v + 1), dle=('blocking', {'openmp': True}))
+    op.apply(time_M=0, autotune='max')
+    assert op._state['autotuning'][0]['runs'] == 60  # Would be 30 with `aggressive`
+    assert op._state['autotuning'][0]['tpr'] == options['squeezer'] + 1
+    assert len(op._state['autotuning'][0]['tuned']) == 3
+
+
+def test_few_timesteps():
+    grid = Grid(shape=(16, 16, 16))
+
+    save = 3
+    assert save < options['squeezer']
+    v = TimeFunction(name='v', grid=grid, save=save)
+
+    # Try forward propagation first
+    op = Operator(Eq(v.forward, v + 1))
+    op.apply(autotune=True)
+    assert op._state['autotuning'][0]['runs'] == 2
+    assert op._state['autotuning'][0]['tpr'] == 2  # Induced by `save`
+
+    # Now try backward propagation
+    op = Operator(Eq(v.backward, v + 1))
+    op.apply(autotune=True)
+    assert op._state['autotuning'][0]['runs'] == 2
+    assert op._state['autotuning'][0]['tpr'] == 2  # Induced by `save`

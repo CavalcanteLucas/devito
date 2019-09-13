@@ -1,15 +1,16 @@
 from collections import OrderedDict
 
-from devito.cgen_utils import Allocator
-from devito.ir.iet import (Expression, Increment, LocalExpression, Element, Iteration,
-                           List, Conditional, Section, HaloSpot, ExpressionBundle,
-                           MapExpressions, Transformer, FindNodes, FindSymbols, XSubs,
-                           iet_analyze, filter_iterations)
-from devito.symbolics import IntDiv, xreplace_indices
-from devito.tools import as_mapper
+import cgen as c
+
+from devito.ir.iet import (ArrayCast, Expression, Increment, LocalExpression, Element,
+                           Iteration, List, Conditional, Section, HaloSpot,
+                           ExpressionBundle, MapSections, Transformer, FindNodes,
+                           FindSymbols, XSubs, iet_analyze, filter_iterations)
+from devito.symbolics import IntDiv, ccode, xreplace_indices
+from devito.tools import as_mapper, as_tuple
 from devito.types import ConditionalDimension
 
-__all__ = ['iet_build', 'iet_insert_C_decls']
+__all__ = ['iet_build', 'iet_insert_decls', 'iet_insert_casts']
 
 
 def iet_build(stree):
@@ -42,7 +43,7 @@ def iet_make(stree):
 
         elif i.is_Exprs:
             exprs = [Increment(e) if e.is_Increment else Expression(e) for e in i.exprs]
-            body = ExpressionBundle(i.shape, i.ops, i.traffic, body=exprs)
+            body = ExpressionBundle(i.ispace, i.ops, i.traffic, body=exprs)
 
         elif i.is_Conditional:
             body = Conditional(i.guard, queues.pop(i))
@@ -51,7 +52,7 @@ def iet_make(stree):
             # Order to ensure deterministic code generation
             uindices = sorted(i.sub_iterators, key=lambda d: d.name)
             # Generate Iteration
-            body = Iteration(queues.pop(i), i.dim, i.dim._limits, offsets=i.limits,
+            body = Iteration(queues.pop(i), i.dim, i.limits, offsets=i.offsets,
                              direction=i.direction, uindices=uindices)
 
         elif i.is_Section:
@@ -103,9 +104,33 @@ def iet_lower_dimensions(iet):
     return iet
 
 
-def iet_insert_C_decls(iet, external=None):
+def iet_insert_casts(iet, parameters):
     """
-    Given an IET, build a new tree with the necessary symbol declarations.
+    Transform the input IET inserting the necessary type casts.
+    The type casts are placed at the top of the IET.
+
+    Parameters
+    ----------
+    iet : Node
+        The input Iteration/Expression tree.
+    parameters : tuple, optional
+        The symbol that might require casting.
+    """
+    # Make the generated code less verbose: if a non-Array parameter does not
+    # appear in any Expression, that is, if the parameter is merely propagated
+    # down to another Call, then there's no need to cast it
+    exprs = FindNodes(Expression).visit(iet)
+    need_cast = {i for i in set().union(*[i.functions for i in exprs]) if i.is_Tensor}
+    need_cast.update({i for i in parameters if i.is_Array})
+
+    casts = [ArrayCast(i) for i in parameters if i in need_cast]
+    iet = List(body=casts + [iet])
+    return iet
+
+
+def iet_insert_decls(iet, external):
+    """
+    Transform the input IET inserting the necessary symbol declarations.
     Declarations are placed as close as possible to the first symbol occurrence.
 
     Parameters
@@ -116,16 +141,16 @@ def iet_insert_C_decls(iet, external=None):
         The symbols defined in some outer Callable, which therefore must not
         be re-defined.
     """
-    external = external or []
+    iet = as_tuple(iet)
 
     # Classify and then schedule declarations to stack/heap
     allocator = Allocator()
-    mapper = OrderedDict()
-    for k, v in MapExpressions().visit(iet).items():
+    for k, v in MapSections().visit(iet).items():
         if k.is_Expression:
-            if k.is_scalar_assign:
-                # Inline declaration
-                mapper[k] = LocalExpression(**k.args)
+            if k.is_definition:
+                # On the stack
+                site = v if v else iet
+                allocator.push_scalar_on_stack(site[-1], k)
                 continue
             objs = [k.write]
         elif k.is_Call:
@@ -135,27 +160,26 @@ def iet_insert_C_decls(iet, external=None):
             try:
                 if i.is_LocalObject:
                     # On the stack
-                    site = v[-1] if v else iet
-                    allocator.push_stack(site, i)
+                    site = v if v else iet
+                    allocator.push_object_on_stack(site[-1], i)
                 elif i.is_Array:
-                    if i in external:
-                        # The Array is to be defined in some foreign IET
+                    if i in as_tuple(external):
+                        # The Array is defined in some other IET
                         continue
                     elif i._mem_stack:
                         # On the stack
                         key = lambda i: not i.is_Parallel
-                        site = filter_iterations(v, key=key, stop='asap') or [iet]
-                        allocator.push_stack(site[-1], i)
+                        site = filter_iterations(v, key=key) or iet
+                        allocator.push_object_on_stack(site[-1], i)
                     else:
-                        # On the heap, as a tensor that must be globally accessible
-                        allocator.push_heap(i)
+                        # On the heap
+                        allocator.push_array_on_heap(i)
             except AttributeError:
                 # E.g., a generic SymPy expression
                 pass
 
     # Introduce declarations on the stack
-    for k, v in allocator.onstack:
-        mapper[k] = tuple(Element(i) for i in v)
+    mapper = dict(allocator.onstack)
     iet = Transformer(mapper, nested=True).visit(iet)
 
     # Introduce declarations on the heap (if any)
@@ -164,3 +188,68 @@ def iet_insert_C_decls(iet, external=None):
         iet = List(header=decls + allocs, body=iet, footer=frees)
 
     return iet
+
+
+class Allocator(object):
+
+    """
+    Support class to generate allocation code in different scopes.
+    """
+
+    def __init__(self):
+        self.heap = OrderedDict()
+        self.stack = OrderedDict()
+
+    def push_object_on_stack(self, scope, obj):
+        """Define an Array or a composite type (e.g., a struct) on the stack."""
+        handle = self.stack.setdefault(scope, OrderedDict())
+
+        if obj.is_LocalObject:
+            handle[obj] = Element(c.Value(obj._C_typename, obj.name))
+        else:
+            shape = "".join("[%s]" % ccode(i) for i in obj.symbolic_shape)
+            alignment = "__attribute__((aligned(%d)))" % obj._data_alignment
+            value = "%s%s %s" % (obj.name, shape, alignment)
+            handle[obj] = Element(c.POD(obj.dtype, value))
+
+    def push_scalar_on_stack(self, scope, expr):
+        """Define a Scalar on the stack."""
+        handle = self.stack.setdefault(scope, OrderedDict())
+
+        obj = expr.write
+        if obj in handle:
+            return
+
+        handle[obj] = None  # Placeholder to avoid reallocation
+        self.stack[expr] = LocalExpression(**expr.args)
+
+    def push_array_on_heap(self, obj):
+        """Define an Array on the heap."""
+        if obj in self.heap:
+            return
+
+        decl = "(*%s)%s" % (obj.name, "".join("[%s]" % i for i in obj.symbolic_shape[1:]))
+        decl = c.Value(obj._C_typedata, decl)
+
+        shape = "".join("[%s]" % i for i in obj.symbolic_shape)
+        alloc = "posix_memalign((void**)&%s, %d, sizeof(%s%s))"
+        alloc = alloc % (obj.name, obj._data_alignment, obj._C_typedata, shape)
+        alloc = c.Statement(alloc)
+
+        free = c.Statement('free(%s)' % obj.name)
+
+        self.heap[obj] = (decl, alloc, free)
+
+    @property
+    def onstack(self):
+        ret = []
+        for k, v in self.stack.items():
+            try:
+                ret.append((k, [i for i in v.values() if i is not None]))
+            except AttributeError:
+                ret.append((k, v))
+        return ret
+
+    @property
+    def onheap(self):
+        return self.heap.values()
