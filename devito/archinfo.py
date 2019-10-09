@@ -28,13 +28,20 @@ def get_cpu_info():
 
     # Extract CPU flags and branch
     if lines:
-        get = lambda k: [i for i in lines if i.startswith(k)][0].split(':')[1].strip()
-        cpu_info['flags'] = get('flags').split()
-        cpu_info['brand'] = get('model name')
-    else:
+        try:
+            get = lambda k: [i for i in lines if i.startswith(k)][0].split(':')[1].strip()
+            cpu_info['flags'] = get('flags').split()
+            cpu_info['brand'] = get('model name')
+        except IndexError:
+            # The /proc/cpuinfo format doesn't follow a standard, and on some
+            # more or less exotic combinations of OS and platform it might not
+            # be what we expect, hence ending up here
+            pass
+    if not all(i in cpu_info for i in ('flags', 'brand')):
+        # Fallback
         ci = cpuinfo.get_cpu_info()
-        cpu_info['flags'] = ci['flags']
-        cpu_info['brand'] = ci['brand']
+        cpu_info['flags'] = ci.get('flags')
+        cpu_info['brand'] = ci.get('brand')
 
     # Detect number of logical cores
     logical = psutil.cpu_count(logical=True)
@@ -180,15 +187,11 @@ class Platform(object):
 
 class Cpu64(Platform):
 
-    def _detect_isa(self):
-        return 'cpp'
-
-
-class Intel64(Cpu64):
+    # The known isas ​​will be overwritten in the specialized classes
+    known_isas = tuple()
 
     def _detect_isa(self):
-        known_isas = ['cpp', 'sse', 'avx', 'avx2', 'avx512']
-        for i in reversed(known_isas):
+        for i in reversed(self.known_isas):
             if any(j.startswith(i) for j in get_cpu_info()['flags']):
                 # Using `startswith`, rather than `==`, as a flag such as 'avx512'
                 # appears as 'avx512f, avx512cd, ...'
@@ -196,8 +199,14 @@ class Intel64(Cpu64):
         return 'cpp'
 
 
+class Intel64(Cpu64):
+
+    known_isas = ('cpp', 'sse', 'avx', 'avx2', 'avx512')
+
+
 class Arm(Cpu64):
-    pass
+
+    known_isas = ('fp', 'asimd', 'asimdrdm')
 
 
 class Power(Cpu64):
@@ -261,6 +270,9 @@ isa_registry = {
     'avx': 32,
     'avx2': 32,
     'avx512': 64,
-    'altivec': 16
+    'altivec': 16,
+    'fp': 8,
+    'asimd': 16,
+    'asimdrdm': 16
 }
 """Size in bytes of a SIMD register in known ISAs."""
