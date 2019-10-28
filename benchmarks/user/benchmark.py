@@ -6,7 +6,7 @@ import click
 import os
 from devito import clear_cache, configuration, warning, set_log_level
 from devito.mpi import MPI
-from devito.tools import as_tuple, sweep
+from devito.tools import all_equal, as_tuple, sweep
 from examples.seismic.acoustic.acoustic_example import run as acoustic_run, acoustic_setup
 from examples.seismic.tti.tti_example import run as tti_run, tti_setup
 from examples.seismic.elastic.elastic_example import run as elastic_run, elastic_setup
@@ -105,7 +105,26 @@ def option_performance(f):
         if value:
             # Block innermost loops if a full block shape is provided
             configuration['dle-options']['blockinner'] = True
-        return value
+            # Normalize value:
+            # 1. integers, not strings
+            # 2. sanity check the (hierarchical) blocking shape
+            normalized_value = []
+            for i, block_shape in enumerate(value):
+                # If hierarchical blocking is activated, say with N levels, here in
+                # `bs` we expect to see 3*N entries
+                bs = [int(x) for x in block_shape.split()]
+                levels = [bs[x:x+3] for x in range(0, len(bs), 3)]
+                if any(len(level) != 3 for level in levels):
+                    raise ValueError("Expected 3 entries per block shape level, but got "
+                                     "one level with less than 3 entries (`%s`)" % levels)
+                normalized_value.append(levels)
+            if not all_equal(len(i) for i in normalized_value):
+                raise ValueError("Found different block shapes with incompatible "
+                                 "number of levels (`%s`)" % normalized_value)
+            configuration['dle-options']['blocklevels'] = len(normalized_value[0])
+        else:
+            normalized_value = []
+        return tuple(normalized_value)
 
     def config_autotuning(ctx, param, value):
         """Setup auto-tuning to run in ``{basic,aggressive,...}+preemptive`` mode."""
@@ -175,20 +194,11 @@ def run(problem, **kwargs):
 
     # Should a specific block-shape be used? Useful if one wants to skip
     # the autotuning pass as a good block-shape is already known
-    if block_shapes:
-        # The following piece of code is horribly hacky, but it works for now
-        for i, block_shape in enumerate(block_shapes):
-            bs = [int(x) for x in block_shape.split()]
-            # If hierarchical blocking is activated, say with N levels, here in
-            # `bs` we expect to see 3*N entries
-            levels = [bs[x:x+3] for x in range(0, len(bs), 3)]
-            for n, level in enumerate(levels):
-                if len(level) != 3:
-                    raise ValueError("Expected 3 entries per block shape level, "
-                                     "but got one level with only %s entries (`%s`)"
-                                     % (len(level), level))
-                for d, s in zip(['x', 'y', 'z'], level):
-                    options['%s%d_blk%d_size' % (d, i, n)] = s
+    # Note: the following piece of code is horribly *hacky*, but it works for now
+    for i, block_shape in enumerate(block_shapes):
+        for n, level in enumerate(block_shape):
+            for d, s in zip(['x', 'y', 'z'], level):
+                options['%s%d_blk%d_size' % (d, i, n)] = s
 
     solver = setup(space_order=space_order, time_order=time_order, **kwargs)
     solver.forward(autotune=autotune, **options)
@@ -293,7 +303,6 @@ def plot(problem, **kwargs):
     flop_ceils = kwargs.pop('flop_ceil')
     point_runtime = kwargs.pop('point_runtime')
     autotune = kwargs['autotune']
-
     arch = kwargs['arch']
     space_order = "[%s]" % ",".join(str(i) for i in kwargs['space_order'])
     time_order = kwargs['time_order']
@@ -322,7 +331,7 @@ def plot(problem, **kwargs):
              if len(set(dict(j)[i] for j in gflopss)) > 1]
 
     # Filename
-    figname = "%s_dim%s_so%s_to%s_arch[%s]_bkend[%s]_at[%s]pdf" % (
+    figname = "%s_shape%s_so%s_to%s_arch[%s]_bkend[%s]_at[%s]" % (
         problem, shape, space_order, time_order, arch, backend, autotune
     )
 
@@ -408,6 +417,8 @@ def get_ob_bench(problem, resultsdir, parameters):
                 devito_params['nt'] = os.environ.get('OMP_NUM_THREADS', default_nthreads)
             else:
                 devito_params['nt'] = 1
+
+            devito_params['mpi'] = configuration['mpi']
 
             if configuration['mpi']:
                 devito_params['np'] = MPI.COMM_WORLD.size

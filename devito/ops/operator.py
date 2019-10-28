@@ -1,6 +1,6 @@
 from devito import Eq
 from devito.ir.equations import ClusterizedEq
-from devito.ir.iet import Call, Expression, List, find_affine_trees
+from devito.ir.iet import Call, Expression, List, derive_parameters, find_affine_trees
 from devito.ir.iet.visitors import FindSymbols, Transformer
 from devito.logger import warning
 from devito.operator import Operator
@@ -73,7 +73,7 @@ class OperatorOPS(Operator):
             if f.is_Constant:
                 continue
 
-            pre_time_loop.extend(create_ops_dat(f, name_to_ops_dat, ops_block))
+            pre_time_loop.extend(list(create_ops_dat(f, name_to_ops_dat, ops_block)))
             # To return the result to Devito, it is necessary to copy the data
             # from the dat object back to the CPU memory.
             after_time_loop.extend(create_ops_fetch(f,
@@ -109,6 +109,14 @@ class OperatorOPS(Operator):
     @property
     def hcode(self):
         return ''.join(str(kernel) for kernel in self._ops_kernels)
+
+    def _finalize(self, iet, parameters):
+        # Applies _finalize for each generated OPS kernel, which will generate the .h file
+        self._ops_kernels = [super(OperatorOPS, self)._finalize(
+            kernel, derive_parameters(kernel, True))
+            for kernel in self._ops_kernels]
+
+        return super()._finalize(iet, parameters)
 
     def _compile(self):
         self._includes.append('%s.h' % self._soname)
