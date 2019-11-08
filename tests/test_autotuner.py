@@ -317,6 +317,7 @@ def test_hierarchical_blocking():
     assert len(op._state['autotuning'][1]['tuned']) == 4
 
 
+@switchconfig(platform='cpu64-dummy')  # To fix the core count
 def test_multiple_threads():
     """
     Test autotuning when different ``num_threads`` for a given OpenMP parallel
@@ -331,6 +332,22 @@ def test_multiple_threads():
     assert op._state['autotuning'][0]['runs'] == 60  # Would be 30 with `aggressive`
     assert op._state['autotuning'][0]['tpr'] == options['squeezer'] + 1
     assert len(op._state['autotuning'][0]['tuned']) == 3
+
+
+@switchconfig(platform='knl7210')  # To trigger nested parallelism
+def test_nested_nthreads():
+    grid = Grid(shape=(96, 96, 96))
+    f = TimeFunction(name='f', grid=grid)
+
+    op = Operator(Eq(f.forward, f + 1.), dle=('advanced', {'openmp': True}))
+    op.apply(time=10, autotune=True)
+
+    assert op._state['autotuning'][0]['runs'] == 6
+    assert op._state['autotuning'][0]['tpr'] == options['squeezer'] + 1
+    assert len(op._state['autotuning'][0]['tuned']) == 3
+    assert 'nthreads' in op._state['autotuning'][0]['tuned']
+    # No tuning for the nested level
+    assert 'nthreads_nested' not in op._state['autotuning'][0]['tuned']
 
 
 def test_few_timesteps():
